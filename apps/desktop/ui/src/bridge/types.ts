@@ -107,3 +107,23 @@ export interface ClipboardPayload {
   is_cut: boolean;
 }
 
+export type WatchEventKind =
+  | "create"
+  | "modify"
+  | "delete"
+  | "rename"
+  | "rescan"
+  | "overflow";
+
+export interface WatchChange {
+  path: string;
+  kind: WatchEventKind;
+}
+
+export interface WatchNotification {
+  dir_path: string;
+  is_overflow: boolean;
+  changes: WatchChange[];
+}
+
+

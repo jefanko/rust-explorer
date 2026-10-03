@@ -257,6 +257,14 @@ export default function App() {
         };
       });
 
+      // Update watch subscriptions
+      const prevTab = tabsRef.current.find((t) => t.id === targetTabId);
+      const prevPath = prevTab?.path;
+      if (prevPath && prevPath.toLowerCase() !== nav.path_display.toLowerCase()) {
+        client.unwatchFolder(prevPath, targetTabId).catch(() => {});
+      }
+      client.watchFolder(nav.path_display, targetTabId).catch(() => {});
+
       await loadDirectory(nav.folder_token, nav.generation, targetTabId);
     } catch (err: any) {
       updateTab(targetTabId, {
@@ -328,6 +336,30 @@ export default function App() {
     }
   }, [tabs]);
 
+  // Listen for live filesystem notifications and reconcile affected tab views
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+
+    client
+      .onWatchNotification((notif) => {
+        const normNotif = notif.dir_path.replace(/[/\\]+$/, "").toLowerCase();
+        for (const tab of tabsRef.current) {
+          const normTab = tab.path.replace(/[/\\]+$/, "").toLowerCase();
+          if (normTab === normNotif) {
+            refresh(tab.id);
+          }
+        }
+      })
+      .then((fn) => {
+        unlisten = fn;
+      })
+      .catch(() => {});
+
+    return () => {
+      if (unlisten) unlisten();
+    };
+  }, []);
+
   // Tab switching
   function switchTab(newIndex: number) {
     if (newIndex === activeTabIndex || newIndex < 0 || newIndex >= tabs.length) return;
@@ -355,6 +387,11 @@ export default function App() {
 
   function closeTab(indexToClose: number, e?: React.MouseEvent) {
     if (e) e.stopPropagation();
+    const closedTab = tabsRef.current[indexToClose];
+    if (closedTab) {
+      client.unwatchAll(closedTab.id).catch(() => {});
+    }
+
     if (tabs.length <= 1) {
       const defaultPath = knownFolders[0]?.path || drives[0]?.path || "C:\\";
       navigateToPath(defaultPath, true, tabs[0].id);
@@ -414,21 +451,24 @@ export default function App() {
     }
   }
 
-  function refresh() {
-    const cur = activeTabRef.current;
+  function refresh(targetTabId?: string | React.MouseEvent) {
+    const cur =
+      typeof targetTabId === "string"
+        ? tabsRef.current.find((t) => t.id === targetTabId) || activeTabRef.current
+        : activeTabRef.current;
     if (!cur.folderToken) return;
-    updateActiveTab({ loading: true });
+    updateTab(cur.id, { loading: true });
     client
       .refresh(cur.folderToken)
       .then((nav) => {
-        updateActiveTab({
+        updateTab(cur.id, {
           folderToken: nav.folder_token,
           generation: nav.generation,
         });
         return loadDirectory(nav.folder_token, nav.generation, cur.id);
       })
       .catch((err: any) => {
-        updateActiveTab({
+        updateTab(cur.id, {
           error: err?.user_message || "Failed to refresh directory",
           loading: false,
         });

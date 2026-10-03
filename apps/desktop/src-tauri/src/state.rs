@@ -1,6 +1,7 @@
 use explorer_fs::FolderService;
 use explorer_jobs::OperationService;
 use explorer_store::{JobJournal, SettingsStore};
+use explorer_watch::WatchService;
 use explorer_win::com::StaWorker;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -10,6 +11,7 @@ pub struct AppState {
     pub settings_store: Arc<SettingsStore>,
     pub job_journal: Arc<JobJournal>,
     pub operation_service: Arc<OperationService>,
+    pub watch_service: Arc<WatchService>,
 }
 
 impl AppState {
@@ -39,11 +41,17 @@ impl AppState {
 
         let operation_service = Arc::new(OperationService::new(sta_worker, job_journal.clone()));
 
+        let watch_service = Arc::new(
+            WatchService::new()
+                .unwrap_or_else(|e| panic!("Failed to initialize WatchService: {e}")),
+        );
+
         Self {
             folder_service: Arc::new(FolderService::new()),
             settings_store,
             job_journal,
             operation_service,
+            watch_service,
         }
     }
 }

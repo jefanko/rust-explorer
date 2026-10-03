@@ -395,3 +395,42 @@ pub async fn clipboard_read() -> Result<Option<ClipboardPayload>, ExplorerError>
         is_cut,
     }))
 }
+
+#[tauri::command]
+pub async fn watch_folder(
+    state: State<'_, AppState>,
+    path: String,
+    subscriber_id: String,
+) -> Result<(), ExplorerError> {
+    let p = PathBuf::from(&path);
+    state
+        .watch_service
+        .subscribe(&p, explorer_watch::WatchMode::NonRecursive, &subscriber_id)
+}
+
+#[tauri::command]
+pub async fn unwatch_folder(
+    state: State<'_, AppState>,
+    path: String,
+    subscriber_id: String,
+) -> Result<(), ExplorerError> {
+    let p = PathBuf::from(&path);
+    state.watch_service.unsubscribe(&p, &subscriber_id)
+}
+
+#[tauri::command]
+pub async fn unwatch_all(
+    state: State<'_, AppState>,
+    subscriber_id: String,
+) -> Result<(), ExplorerError> {
+    state.watch_service.unsubscribe_all(&subscriber_id)
+}
+
+#[tauri::command]
+pub async fn get_watch_status(
+    state: State<'_, AppState>,
+    path: String,
+) -> Result<bool, ExplorerError> {
+    let p = PathBuf::from(&path);
+    Ok(state.watch_service.is_degraded(&p))
+}

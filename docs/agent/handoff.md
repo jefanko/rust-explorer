@@ -42,16 +42,27 @@
   - UI toolbar buttons, context menu items, keyboard shortcuts (<kbd>Ctrl+C</kbd>, <kbd>Ctrl+X</kbd>, <kbd>Ctrl+V</kbd>, <kbd>Delete</kbd>), and guarded Recycle confirmation modal.
   - Fast verification suite passed (`.\scripts\check.ps1`, 19 tests, 0 warnings) and standalone executable compiled.
 
+- **Milestone M5 — Live Changes**: 100% COMPLETE.
+  - Native filesystem watching via `notify::RecommendedWatcher` backed by Windows `ReadDirectoryChangesW`.
+  - Bounded ingress channel (4,096 capacity) and bounded dirty directories (1,024 capacity) with overflow reconciliation protection.
+  - 150 ms debounce coalescing window with 500 ms maximum wait cap to prevent starvation.
+  - Reference-counted directory subscriptions per tab, mode upgrades, and zero-leak cleanup on tab close (`unsubscribe_all`).
+  - Webview bridge receiving `"watch-notification"` events and automatically refreshing visible directory listings.
+  - Fast verification suite passed (`.\scripts\check.ps1`, 25 tests, 0 warnings) and debug desktop binary packaged.
+
 ## Current Milestone
-- **Milestone**: M5 — Live Changes
+- **Milestone**: M6 — Indexed Filename Search
 - **Active Tickets**:
-  - `M5.1 Directory Watching`: `notify` backend integration for active tab folder watching and indexed roots.
-  - `M5.2 Coalescing & Reconciliation`: Event batching, debounce, dirty-root tracking, and folder snapshot reconciliation.
+  - `M6.1 SQLite FTS5 Setup`: Authoritative metadata table and FTS5 trigram table with sync triggers.
+  - `M6.2 Metadata Crawler`: Safe non-recursive reparse point crawling, background throttling.
+  - `M6.3 Search Query Engine`: Query parser (terms, phrases, `ext:`, `type:`), ranking, paged results.
+  - `M6.4 Search UI`: Current folder filter and indexed search scope switcher.
 
 ## Next Commands
-1. Review `crates/explorer-watch` structure and dependencies (integrate `notify` crate with recommended Windows ReadDirectoryChangesW backend).
-2. Implement watch subscription service managing active directory watches per tab.
-3. Implement coalescing and debounce logic to avoid event flooding during bulk filesystem operations.
-4. Wire watch events into `FolderService` / active snapshot refresh and emit UI change signals.
-5. Verify with `.\scripts\check.ps1` and test live file change reflections.
+1. Review `crates/explorer-index` crate structure and dependencies.
+2. Implement SQLite schema with `roots`, `entries`, and `filename_fts` virtual table using the trigram tokenizer.
+3. Add sync triggers ensuring FTS5 table stays consistent with entries metadata on insert, update, and delete.
+4. Implement metadata crawler respecting exclusion paths, reparse point skipping, and batch commit pacing (500 entries or 100 ms).
+5. Implement search query parser supporting terms, phrases (`"..."`), `ext:`, `type:`, and trigram ranking.
+6. Connect search IPC commands to Tauri and add search scope switcher in UI.
 

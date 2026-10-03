@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import {
   BootstrapData,
   DirectoryPage,
@@ -9,6 +10,7 @@ import {
   OperationPlan,
   SortColumn,
   SortDirection,
+  WatchNotification,
 } from "./types";
 
 export const client = {
@@ -183,5 +185,30 @@ export const client = {
   async clipboardRead(): Promise<ClipboardPayload | null> {
     return invoke<ClipboardPayload | null>("clipboard_read");
   },
+
+  async watchFolder(path: string, subscriberId: string): Promise<void> {
+    return invoke<void>("watch_folder", { path, subscriberId });
+  },
+
+  async unwatchFolder(path: string, subscriberId: string): Promise<void> {
+    return invoke<void>("unwatch_folder", { path, subscriberId });
+  },
+
+  async unwatchAll(subscriberId: string): Promise<void> {
+    return invoke<void>("unwatch_all", { subscriberId });
+  },
+
+  async getWatchStatus(path: string): Promise<boolean> {
+    return invoke<boolean>("get_watch_status", { path });
+  },
+
+  async onWatchNotification(
+    callback: (notif: WatchNotification) => void
+  ): Promise<UnlistenFn> {
+    return listen<WatchNotification>("watch-notification", (event) => {
+      callback(event.payload);
+    });
+  },
 };
+
 

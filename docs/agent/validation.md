@@ -94,3 +94,23 @@ Every entry records: Date (UTC/Local), Milestone, Command executed, Build/Commit
 | 2026-10-03 | M4.4 | `.\scripts\check.ps1` | PASS | Complete CI fast verification suite passed 100%. |
 | 2026-10-03 | M4.4 | `npx tauri build --debug --no-bundle` | PASS | Standalone executable `target\debug\rust-explorer.exe` compiled cleanly with copy, move, recycle modal, and clipboard features. |
 
+---
+
+### M5 Validation Log
+
+| Date | Step | Command | Result | Evidence / Output |
+|---|---|---|---|---|
+| 2026-10-03 | M5.1 | `cargo test --package explorer-watch` | PASS | `test_live_filesystem_modification_emits_notification`: Verified live Windows OS change events via `notify::RecommendedWatcher`. |
+| 2026-10-03 | M5.1 | `cargo test --package explorer-watch` | PASS | `test_watch_service_subscription_lifecycle_and_refcounts`: Reference counted subscriptions per path, deduplication, and mode upgrade verified. |
+| 2026-10-03 | M5.1 | `cargo test --package explorer-watch` | PASS | `test_unsubscribe_all_cleans_tab_watches`: Verified no handle or watch leaks on tab close. |
+| 2026-10-03 | M5.2 | `cargo test --package explorer-watch` | PASS | `test_event_coalescing_and_deduplication`: 150 ms debounce coalescing window and deduplication within bursts verified. |
+| 2026-10-03 | M5.2 | `cargo test --package explorer-watch` | PASS | `test_overflow_event_clears_changes`: Verified `MAX_DIRTY_DIRS` (1024) bounding and overflow transition for full rescan reconciliation. |
+| 2026-10-03 | M5.2 | `cargo test --package explorer-watch` | PASS | `test_reconciliation_lifecycle_and_backoff`: Verified failure backoff (2s to 30s) and freshness recovery. |
+| 2026-10-03 | M5.2 | `cargo clippy --workspace --all-targets -- -D warnings` | PASS | Zero warnings across all targets with `-D warnings`. |
+| 2026-10-03 | M5.2 | `cargo test --workspace` | PASS | All 25 unit and integration tests across 7 crates pass 100%. |
+| 2026-10-03 | M5.2 | `npm run typecheck` & `npm run test:unit` | PASS | Strict TypeScript type checking passed with 0 errors; Vitest unit tests passed. |
+| 2026-10-03 | M5.2 | `npm run build:ui` | PASS | Vite production build compiled (`dist/index.html`, CSS, JS bundles). |
+| 2026-10-03 | M5.2 | `.\scripts\check.ps1` | PASS | Full fast verification suite passed 100%. |
+| 2026-10-03 | M5.2 | `npx tauri build --debug --no-bundle` | PASS | Standalone executable `target\debug\rust-explorer.exe` compiled cleanly with live watching enabled. |
+
+

@@ -149,5 +149,47 @@
 - Fast verification suite `.\scripts\check.ps1` passed 100% (format, clippy with `-D warnings`, 19 Rust workspace tests, TypeScript strict typecheck, Vitest unit tests, UI build, and doctor).
 - Built debug desktop binary `target\debug\rust-explorer.exe` via `npx tauri build --debug --no-bundle`.
 
-**Next Milestone**: Milestone M5 — Live Changes (`notify` backend integration for visible folders and indexed roots, event batching, debounce, dirty-root tracking, and directory snapshot reconciliation).
+## Milestone M5 — Live Changes [COMPLETE]
+
+### Step 1: Notify Adapter & Ingress Bounding
+- Implemented `crates/explorer-watch/src/adapter.rs`:
+  - `NotifyAdapter`: Integrates `notify::RecommendedWatcher` with Windows `ReadDirectoryChangesW` backend.
+  - Ingress channel capacity bounded at 4,096 raw events (`tokio::sync::mpsc::channel(4096)`).
+  - Handles backend errors and buffer saturation by raising `is_overflow` flags and emitting `WatchEventKind::Overflow` notifications.
+  - Supports non-recursive (visible folder tabs) and recursive (indexed roots) watching modes.
+
+### Step 2: Event Coalescer & Dirty-Root Bounding
+- Implemented `crates/explorer-watch/src/coalesce.rs`:
+  - `EventCoalescer`: Implements a 150 ms debounce coalescing window (conforming to the 100–200 ms requirement) with a maximum debounce wait cap of 500 ms to prevent starvation during continuous file system mutations.
+  - Limits dirty directory records to at most 1,024 unique directories (`MAX_DIRTY_DIRS = 1024`).
+  - Upon exceeding 1,024 dirty directories or upon receiving overflow events, transitions into overflow reconciliation and drops granular item records to prevent unbounded memory growth.
+  - Unit tests verify deduplication, debounce timing, and overflow clearing.
+
+### Step 3: Degradation Recovery & Tab Subscription Service
+- Implemented `crates/explorer-watch/src/reconcile.rs`:
+  - `ReconciliationManager`: Tracks per-path freshness and degradation state.
+  - Implements exponential backoff on repeated reconciliation failures (2s default interval up to 30s maximum backoff).
+- Implemented `crates/explorer-watch/src/service.rs`:
+  - `WatchService`: Thread-safe coordinator for watches and tab subscriptions.
+  - Reference-counted subscriptions per canonical path (`subscriber_count`).
+  - Automatic watch mode upgrades (e.g. from non-recursive to recursive if required).
+  - `unsubscribe_all`: Cleans up all watches for a closed tab, preventing resource and handle leaks (satisfies tab lifecycle leak gate).
+  - Unit tests verify multi-tab subscription refcounts, tab closure cleanup, and live Windows filesystem modification events.
+
+### Step 4: Desktop Host & Webview Event Bridge
+- Updated `apps/desktop/src-tauri`:
+  - Registered `WatchService` in `AppState`.
+  - Added setup hook in `lib.rs` that subscribes to coalesced notifications and forwards them to the webview via Tauri event `"watch-notification"`.
+  - Exposed IPC commands: `watch_folder`, `unwatch_folder`, `unwatch_all`, `get_watch_status`.
+- Updated `apps/desktop/ui`:
+  - Added typed bindings in `bridge/types.ts` and `bridge/client.ts`.
+  - In `App.tsx`, automatically subscribes to active folder paths when tabs navigate, unwatching previous paths.
+  - In `closeTab`, cleans up all watches associated with the closed tab.
+  - Listens to `"watch-notification"` and automatically triggers directory refresh/reconciliation when watched folders change on disk.
+
+### Step 5: Verification & Packaging
+- Fast verification suite `.\scripts\check.ps1` passed 100% (format, clippy with `-D warnings`, 25 Rust workspace tests, TypeScript strict typecheck, Vitest unit tests, UI build, and doctor).
+- Built debug desktop binary `target\debug\rust-explorer.exe` via `npx tauri build --debug --no-bundle`.
+
+**Next Milestone**: Milestone M6 — Indexed Filename Search (SQLite FTS5 trigram setup, metadata crawler, query parsing with filters, and indexed search scope UI).
 

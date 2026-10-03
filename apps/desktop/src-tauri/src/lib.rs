@@ -2,6 +2,7 @@ pub mod commands;
 pub mod state;
 
 use state::AppState;
+use tauri::{Emitter, Manager};
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -11,6 +12,19 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .manage(AppState::new())
+        .setup(|app| {
+            let handle = app.handle().clone();
+            let state = app.state::<AppState>();
+            let mut notif_rx = state.watch_service.subscribe_notifications();
+
+            tauri::async_runtime::spawn(async move {
+                while let Ok(notif) = notif_rx.recv().await {
+                    let _ = handle.emit("watch-notification", &notif);
+                }
+            });
+
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             commands::bootstrap,
             commands::navigate,
@@ -36,7 +50,11 @@ pub fn run() {
             commands::execute_recycle,
             commands::clipboard_write,
             commands::clipboard_read,
-            commands::list_jobs
+            commands::list_jobs,
+            commands::watch_folder,
+            commands::unwatch_folder,
+            commands::unwatch_all,
+            commands::get_watch_status
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

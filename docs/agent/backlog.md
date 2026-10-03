@@ -34,9 +34,9 @@
 - [x] **M4.3 Cancellation & Partial Outcomes**: Cooperative cancellation, item-level outcome recording, retry planning.
 - [x] **M4.4 Explorer Clipboard Interoperability**: `CF_HDROP` copy/cut/paste interoperable with Windows Explorer.
 
-## Milestone M5 — Live Changes
-- [ ] **M5.1 Directory Watching**: `notify` backend integration for visible folders and indexed roots.
-- [ ] **M5.2 Coalescing & Reconciliation**: Event batching, debounce, dirty-root tracking, and overflow recovery.
+## Milestone M5 — Live Changes [COMPLETE]
+- [x] **M5.1 Directory Watching**: `notify` backend integration for visible folders and indexed roots.
+- [x] **M5.2 Coalescing & Reconciliation**: Event batching, debounce, dirty-root tracking, and overflow recovery.
 
 ## Milestone M6 — Indexed Filename Search
 - [ ] **M6.1 SQLite FTS5 Setup**: Authoritative metadata table and FTS5 trigram table with sync triggers.
