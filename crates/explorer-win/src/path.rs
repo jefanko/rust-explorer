@@ -51,9 +51,11 @@ pub fn ensure_extended_prefix(path: &Path) -> PathBuf {
 /// Validates that a path is safe for navigation and mutation.
 /// Rejects device paths (\\.\), embedded NULs, and Alternate Data Streams (:).
 pub fn validate_safe_path(path: &Path) -> Result<(), ExplorerError> {
-    let path_str = path.to_string_lossy();
+    let unextended = strip_extended_prefix(path);
+    let path_str = unextended.to_string_lossy();
+    let trimmed = path_str.trim();
 
-    if path_str.contains('\0') {
+    if trimmed.contains('\0') {
         return Err(ExplorerError::new(
             ErrorCode::InvalidName,
             "Path contains embedded null characters",
@@ -61,7 +63,7 @@ pub fn validate_safe_path(path: &Path) -> Result<(), ExplorerError> {
         ));
     }
 
-    if path_str.starts_with(r"\\.\") {
+    if trimmed.starts_with(r"\\.\") {
         return Err(ExplorerError::new(
             ErrorCode::UnsupportedPath,
             "Device namespace paths (\\\\.\\) are not supported",
@@ -71,7 +73,7 @@ pub fn validate_safe_path(path: &Path) -> Result<(), ExplorerError> {
 
     // Check for ADS (Alternate Data Streams) e.g., "file.txt:stream"
     // We allow drive letters "C:\" at position 1.
-    for (i, c) in path_str.char_indices() {
+    for (i, c) in trimmed.char_indices() {
         if c == ':' && i != 1 {
             return Err(ExplorerError::new(
                 ErrorCode::UnsupportedPath,
@@ -162,8 +164,10 @@ mod tests {
     #[test]
     fn test_path_safety_validation() {
         assert!(validate_safe_path(Path::new(r"C:\Users\John\Documents")).is_ok());
+        assert!(validate_safe_path(Path::new(r"\\?\C:\Users\John\Documents")).is_ok());
         assert!(validate_safe_path(Path::new(r"\\.\PhysicalDrive0")).is_err());
         assert!(validate_safe_path(Path::new(r"C:\folder\CON.txt")).is_err());
         assert!(validate_safe_path(Path::new(r"C:\file.txt:hidden")).is_err());
+        assert!(validate_safe_path(Path::new(r"\\?\C:\file.txt:hidden")).is_err());
     }
 }
