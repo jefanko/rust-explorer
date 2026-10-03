@@ -16,7 +16,13 @@ pub fn run() {
             commands::navigate,
             commands::list_page,
             commands::refresh,
-            commands::open_item
+            commands::open_item,
+            commands::show_properties,
+            commands::open_in_explorer,
+            commands::load_settings,
+            commands::save_settings,
+            commands::add_favorite,
+            commands::remove_favorite
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

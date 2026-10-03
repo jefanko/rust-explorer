@@ -15,12 +15,12 @@
 - [x] **M1.6 Sidebar Known Folders & Drives**: Integrate `SHGetKnownFolderPath` (Documents, Downloads, Desktop, etc.) and `GetLogicalDriveStringsW` / `GetDiskFreeSpaceExW`.
 - [x] **M1.7 Navigation Address Bar & History**: Implement editable address bar, back/forward/up navigation with history stack, and instant folder filtering.
 
-## Milestone M2 — Tabs and Interaction
-- [ ] **M2.1 Multi-Tab State**: Independent location, history, scroll, and selection per tab.
-- [ ] **M2.2 Keyboard Navigation**: Full keyboard shortcuts (Enter, Arrows, Alt+Left/Right/Up, Ctrl+L, Ctrl+T, Ctrl+W, F5).
-- [ ] **M2.3 Selection & Context Menu**: Multi-selection, stable row keys, app-owned context menu.
-- [ ] **M2.4 Native Open & Properties**: `ShellExecuteExW` file association launch and native properties dialog.
-- [ ] **M2.5 Persistent Preferences**: Settings store for theme, favorites, tab restoration, column widths.
+## Milestone M2 — Tabs and Interaction [COMPLETE]
+- [x] **M2.1 Multi-Tab State**: Independent location, history, scroll, and selection per tab.
+- [x] **M2.2 Keyboard Navigation**: Full keyboard shortcuts (Enter, Arrows, Alt+Left/Right/Up, Ctrl+L, Ctrl+T, Ctrl+W, F5).
+- [x] **M2.3 Selection & Context Menu**: Multi-selection, stable row keys, app-owned context menu.
+- [x] **M2.4 Native Open & Properties**: `ShellExecuteExW` file association launch and native properties dialog.
+- [x] **M2.5 Persistent Preferences**: Settings store for theme, favorites, tab restoration, column widths.
 
 ## Milestone M3 — Native Mutation Vertical Slice
 - [ ] **M3.1 Dedicated COM STA Worker**: File operation STA thread with message pump for `IFileOperation`.

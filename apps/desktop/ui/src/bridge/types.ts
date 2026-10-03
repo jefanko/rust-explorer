@@ -55,3 +55,11 @@ export interface NavigationResponse {
   generation: number;
   total_entries: number;
 }
+
+export interface AppSettings {
+  theme: "system" | "light" | "dark";
+  show_hidden_files: boolean;
+  restore_tabs: boolean;
+  saved_tabs: string[];
+  favorites: string[];
+}

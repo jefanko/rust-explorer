@@ -1,5 +1,12 @@
 $ErrorActionPreference = "Stop"
 
+if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) {
+    $cargoBin = "$env:USERPROFILE\.cargo\bin"
+    if (Test-Path $cargoBin) {
+        $env:Path = "$cargoBin;$env:Path"
+    }
+}
+
 Write-Host "=== Fast Verification Suite ==="
 
 Write-Host "`n--> Rust formatting check..."
@@ -13,6 +20,9 @@ cargo test --workspace
 
 Write-Host "`n--> UI Typecheck..."
 npm run typecheck
+
+Write-Host "`n--> UI Unit tests..."
+npm run test:unit
 
 Write-Host "`n--> UI Production Build..."
 npm run build:ui

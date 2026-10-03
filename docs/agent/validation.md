@@ -40,3 +40,19 @@ Every entry records: Date (UTC/Local), Milestone, Command executed, Build/Commit
 | 2026-10-03 | M1.6 | `cargo clippy --workspace --all-targets -- -D warnings` | PASS | Clean clippy run across workspace. |
 | 2026-10-03 | M1.7 | `.\scripts\check.ps1` | PASS | Complete CI pipeline checks passed 100%. |
 | 2026-10-03 | M1.7 | Live Desktop Launch | PASS | Launched process PID 6512 with HWND 4459148. Real directories (Documents, Drives) enumerate and render interactively. |
+
+---
+
+### M2 Validation Log
+
+| Date | Step | Command | Result | Evidence / Output |
+|---|---|---|---|---|
+| 2026-10-03 | M2.1 | `npm run test:unit` | PASS | Unit tests verify tab title extraction, path handling, and multi-selection range math. |
+| 2026-10-03 | M2.2 | `cargo test --package explorer-store` | PASS | `test_settings_store_in_memory` verifies SQLite kv_store and favorites persistence. |
+| 2026-10-03 | M2.3 | `cargo test --workspace` | PASS | All 12 unit/integration tests across workspace pass cleanly. |
+| 2026-10-03 | M2.4 | `cargo clippy --workspace --all-targets -- -D warnings` | PASS | Zero warnings across all targets with `-D warnings`. |
+| 2026-10-03 | M2.5 | `npm run typecheck` | PASS | Strict TypeScript check passed with 0 errors. |
+| 2026-10-03 | M2.5 | `npm run build:ui` | PASS | Vite bundle built in 6.69s (`dist/index.html`, CSS, and JS). |
+| 2026-10-03 | M2.5 | `cargo xtask doctor` | PASS | All prerequisites (git, node, npm, SQLite FTS5 trigram virtual tables) passed. |
+| 2026-10-03 | M2.5 | `.\scripts\check.ps1` | PASS | Complete verification suite passed (format, clippy, tests, typecheck, unit tests, build, doctor). |
+| 2026-10-03 | M2.5 | `npx tauri build --debug --no-bundle` | PASS | Standalone executable `target\debug\rust-explorer.exe` produced with offline embedded assets. |

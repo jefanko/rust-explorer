@@ -33,4 +33,42 @@
 - Verified with `.\scripts\check.ps1` (0 warnings, 0 errors, all tests passing).
 - Rebuilt desktop binary `rust-explorer.exe` with embedded assets and launched on desktop.
 
-**Next Milestone**: Milestone M2 — Tabs and Interaction (multi-tab state, keyboard shortcuts, favorites, persistent settings).
+## Milestone M2 — Tabs and Interaction [COMPLETE]
+
+### Step 1: SQLite Settings Store & Win32 Shell Extensions
+- Implemented `crates/explorer-store/src/settings.rs`:
+  - `SettingsStore` with SQLite `kv_store` (schema versioning, JSON app preferences) and `favorites` table (path, display name, timestamp).
+  - Open in-memory support for testing and on-disk SQLite at `%LOCALAPPDATA%\RustExplorer\state.sqlite3`.
+- Extended `crates/explorer-win/src/shell.rs`:
+  - `show_file_properties`: Invokes native Windows Shell properties dialog using `ShellExecuteExW` with `SEE_MASK_INVOKEIDLIST` and `properties` verb.
+  - `open_in_windows_explorer`: Spawns `explorer.exe /select,"<path>"` using argument vectors rather than shell interpolation.
+- Added and registered Tauri IPC commands in `apps/desktop/src-tauri/src/commands.rs`:
+  - `show_properties`, `open_in_explorer`, `load_settings`, `save_settings`, `add_favorite`, `remove_favorite`.
+
+### Step 2: Multi-Tab State, Keyboard Navigation & Context Menus
+- Refactored `apps/desktop/ui/src/app/App.tsx`:
+  - Independent tab state: each tab preserves its own folder path, history stack, scroll position, entries snapshot, sort parameters, selection, and filter query.
+  - Tab management: create tab (`+` or `Ctrl+T`), close tab (`×` or `Ctrl+W`), cycle tabs (`Ctrl+Tab`, `Ctrl+Shift+Tab`), and tab restoration via `SettingsStore`.
+  - Comprehensive keyboard navigation:
+    - `Alt+Left` / `Alt+Right` / `Alt+Up`: Back / Forward / Parent directory.
+    - `Ctrl+L`: Focus address bar with automatic text selection.
+    - `Ctrl+F`: Focus search/filter input.
+    - `F5`: Refresh current folder.
+    - `Ctrl+A`: Select all items in current listing (excluded while typing in inputs).
+    - `ArrowUp` / `ArrowDown`: Visible focus row navigation with automatic scroll into view.
+    - `Shift+ArrowUp` / `Shift+ArrowDown`: Multi-selection range expansion.
+    - `Home` / `End`: Jump to first or last row.
+    - `Enter`: Navigate into folder or launch file with associated application.
+    - `Alt+Enter`: Open native Windows Shell properties dialog.
+    - `Escape`: Clear selection, blur active inputs, or dismiss context menu.
+  - Context menu:
+    - Custom app-owned context menu on right click for files, folders, and empty folder background.
+    - Menu actions: Open, Open in Windows Explorer, Add to Favorites, Refresh, Properties.
+  - Favorites & Themes:
+    - Sidebar Favorites section with pinned paths and quick remove buttons.
+    - System / Light / Dark theme switcher with persistence in SQLite store.
+- Added unit tests in `apps/desktop/ui/src/test/App.test.tsx` verifying formatting, tab title extraction, and selection range computation.
+- Verified with `.\scripts\check.ps1` (0 warnings, 0 errors, all Rust + UI tests passing).
+- Packaged offline standalone binary `rust-explorer.exe` with embedded assets via `npx tauri build --debug --no-bundle`.
+
+**Next Milestone**: Milestone M3 — Native Mutation Vertical Slice (Dedicated COM STA worker for `IFileOperation`, immutable operation plans, single-use commit tokens, create-folder and rename, job drawer UI).

@@ -3,6 +3,7 @@ import {
   BootstrapData,
   DirectoryPage,
   NavigationResponse,
+  AppSettings,
   SortColumn,
   SortDirection,
 } from "./types";
@@ -46,5 +47,41 @@ export const client = {
       folderToken,
       itemToken,
     });
+  },
+
+  async showProperties(
+    folderToken: string,
+    itemToken?: string | null
+  ): Promise<void> {
+    return invoke<void>("show_properties", {
+      folderToken,
+      itemToken: itemToken || null,
+    });
+  },
+
+  async openInExplorer(
+    folderToken: string,
+    itemToken?: string | null
+  ): Promise<void> {
+    return invoke<void>("open_in_explorer", {
+      folderToken,
+      itemToken: itemToken || null,
+    });
+  },
+
+  async loadSettings(): Promise<AppSettings> {
+    return invoke<AppSettings>("load_settings");
+  },
+
+  async saveSettings(settings: AppSettings): Promise<void> {
+    return invoke<void>("save_settings", { settings });
+  },
+
+  async addFavorite(path: string): Promise<void> {
+    return invoke<void>("add_favorite", { path });
+  },
+
+  async removeFavorite(path: string): Promise<void> {
+    return invoke<void>("remove_favorite", { path });
   },
 };
