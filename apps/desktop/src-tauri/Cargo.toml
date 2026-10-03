@@ -1,0 +1,29 @@
+[package]
+name = "rust-explorer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "rust_explorer_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2.0", features = [] }
+
+[dependencies]
+explorer-domain = { workspace = true }
+explorer-win = { workspace = true }
+explorer-fs = { workspace = true }
+explorer-jobs = { workspace = true }
+explorer-index = { workspace = true }
+explorer-watch = { workspace = true }
+explorer-store = { workspace = true }
+
+tauri = { version = "2.2", features = [] }
+tauri-plugin-shell = "2.2"
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }

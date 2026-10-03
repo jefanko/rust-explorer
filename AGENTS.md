@@ -1,0 +1,13 @@
+# Agent contract
+- Read the project specification and docs/agent/handoff.md before changing code.
+- Implement Rust-owned filesystem behavior; keep UI/IPC adapters thin.
+- Preserve lossless Windows paths; use native item tokens for mutation.
+- Use the dedicated STA for Shell operations; never block the UI thread.
+- All mutations use validated plans, journals, and explicit outcomes.
+- Mutation tests use marked fixture roots only.
+- Use the single per-user application executor; do not run competing mutation instances.
+- Never silently fall back from Recycle to permanent deletion.
+- Run targeted checks, then milestone gates; fix failures instead of disabling checks.
+- Record real validation results and capability skips.
+- Continue through milestone acceptance; maintain a resumable handoff.
+- Do not publish externally or change global Windows shell settings without authorization.

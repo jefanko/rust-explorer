@@ -1,0 +1,13 @@
+[package]
+name = "explorer-fs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+explorer-domain.workspace = true
+explorer-win.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tokio.workspace = true
+serde.workspace = true

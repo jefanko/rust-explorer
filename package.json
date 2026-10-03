@@ -1,0 +1,19 @@
+{
+  "name": "rust-explorer-root",
+  "version": "0.1.0",
+  "private": true,
+  "packageManager": "npm@10.9.3",
+  "workspaces": [
+    "apps/desktop"
+  ],
+  "scripts": {
+    "dev:desktop": "npm run --workspace=@rust-explorer/desktop dev:desktop",
+    "build:desktop": "npm run --workspace=@rust-explorer/desktop build:desktop",
+    "build:ui": "npm run --workspace=@rust-explorer/desktop build:ui",
+    "typecheck": "npm run --workspace=@rust-explorer/desktop typecheck",
+    "lint": "npm run --workspace=@rust-explorer/desktop lint",
+    "test:unit": "npm run --workspace=@rust-explorer/desktop test:unit",
+    "test:e2e:ui": "npm run --workspace=@rust-explorer/desktop test:e2e:ui",
+    "test:e2e:native": "npm run --workspace=@rust-explorer/desktop test:e2e:native"
+  }
+}

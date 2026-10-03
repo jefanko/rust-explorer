@@ -1,0 +1,48 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/*",
+    "apps/desktop/src-tauri",
+    "xtask",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+authors = ["Rust Explorer Contributors"]
+license = "MIT"
+repository = "https://github.com/rust-explorer/rust-explorer"
+
+[workspace.dependencies]
+# Internal crates
+explorer-domain = { path = "crates/explorer-domain" }
+explorer-win = { path = "crates/explorer-win" }
+explorer-fs = { path = "crates/explorer-fs" }
+explorer-jobs = { path = "crates/explorer-jobs" }
+explorer-index = { path = "crates/explorer-index" }
+explorer-watch = { path = "crates/explorer-watch" }
+explorer-store = { path = "crates/explorer-store" }
+
+# Serialization and IDs
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+uuid = { version = "1.13", features = ["v4", "serde"] }
+
+# Asynchronous and concurrency
+tokio = { version = "1.43", features = ["rt-multi-thread", "sync", "time", "macros"] }
+
+# Database and watching
+rusqlite = { version = "0.33", features = ["bundled"] }
+notify = "7.0"
+
+# Errors and logging
+thiserror = "2.0"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Windows bindings
+windows = "0.58"
+
+# Testing utilities
+tempfile = "3.17"
+proptest = "1.6"
