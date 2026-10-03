@@ -434,3 +434,79 @@ pub async fn get_watch_status(
     let p = PathBuf::from(&path);
     Ok(state.watch_service.is_degraded(&p))
 }
+
+#[tauri::command]
+pub async fn list_indexed_roots(
+    state: State<'_, AppState>,
+) -> Result<Vec<explorer_index::IndexedRoot>, ExplorerError> {
+    state.index_service.list_roots()
+}
+
+#[tauri::command]
+pub async fn add_indexed_root(
+    state: State<'_, AppState>,
+    path: String,
+) -> Result<explorer_index::IndexedRoot, ExplorerError> {
+    let p = PathBuf::from(&path);
+    state.index_service.add_root(&p)
+}
+
+#[tauri::command]
+pub async fn remove_indexed_root(
+    state: State<'_, AppState>,
+    root_id: String,
+) -> Result<(), ExplorerError> {
+    state.index_service.remove_root(&root_id)
+}
+
+#[tauri::command]
+pub async fn recrawl_indexed_root(
+    state: State<'_, AppState>,
+    root_id: String,
+) -> Result<(), ExplorerError> {
+    state.index_service.recrawl_root(&root_id)
+}
+
+#[tauri::command]
+pub async fn search_indexed(
+    state: State<'_, AppState>,
+    query: String,
+    root_id: Option<String>,
+    page: usize,
+    page_size: usize,
+) -> Result<explorer_index::SearchResponse, ExplorerError> {
+    state
+        .index_service
+        .search(&query, root_id.as_deref(), page, page_size)
+}
+
+#[tauri::command]
+pub async fn open_path(
+    path: String,
+    state: State<'_, AppState>,
+) -> Result<Option<NavigationResponse>, ExplorerError> {
+    let p = PathBuf::from(&path);
+    if !p.exists() {
+        return Err(ExplorerError::new(
+            ErrorCode::NotFound,
+            format!("Path does not exist: {path}"),
+            "open_path",
+        ));
+    }
+    let folder_svc = state.folder_service.clone();
+    if p.is_dir() {
+        let nav = tokio::task::spawn_blocking(move || folder_svc.navigate(&p))
+            .await
+            .map_err(|_| {
+                ExplorerError::new(ErrorCode::Internal, "Worker join failed", "open_path")
+            })??;
+        Ok(Some(nav))
+    } else {
+        tokio::task::spawn_blocking(move || open_file_with_association(&p))
+            .await
+            .map_err(|_| {
+                ExplorerError::new(ErrorCode::Internal, "Worker join failed", "open_path")
+            })??;
+        Ok(None)
+    }
+}

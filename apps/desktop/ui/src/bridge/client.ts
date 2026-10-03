@@ -11,6 +11,8 @@ import {
   SortColumn,
   SortDirection,
   WatchNotification,
+  IndexedRoot,
+  SearchResponse,
 } from "./types";
 
 export const client = {
@@ -208,6 +210,40 @@ export const client = {
     return listen<WatchNotification>("watch-notification", (event) => {
       callback(event.payload);
     });
+  },
+
+  async listIndexedRoots(): Promise<IndexedRoot[]> {
+    return invoke<IndexedRoot[]>("list_indexed_roots");
+  },
+
+  async addIndexedRoot(path: string): Promise<IndexedRoot> {
+    return invoke<IndexedRoot>("add_indexed_root", { path });
+  },
+
+  async removeIndexedRoot(rootId: string): Promise<void> {
+    return invoke<void>("remove_indexed_root", { rootId });
+  },
+
+  async recrawlIndexedRoot(rootId: string): Promise<void> {
+    return invoke<void>("recrawl_indexed_root", { rootId });
+  },
+
+  async searchIndexed(
+    query: string,
+    rootId?: string | null,
+    page: number = 1,
+    pageSize: number = 50
+  ): Promise<SearchResponse> {
+    return invoke<SearchResponse>("search_indexed", {
+      query,
+      rootId: rootId || null,
+      page,
+      pageSize,
+    });
+  },
+
+  async openPath(path: string): Promise<NavigationResponse | null> {
+    return invoke<NavigationResponse | null>("open_path", { path });
   },
 };
 

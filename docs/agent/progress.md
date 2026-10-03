@@ -191,5 +191,56 @@
 - Fast verification suite `.\scripts\check.ps1` passed 100% (format, clippy with `-D warnings`, 25 Rust workspace tests, TypeScript strict typecheck, Vitest unit tests, UI build, and doctor).
 - Built debug desktop binary `target\debug\rust-explorer.exe` via `npx tauri build --debug --no-bundle`.
 
-**Next Milestone**: Milestone M6 — Indexed Filename Search (SQLite FTS5 trigram setup, metadata crawler, query parsing with filters, and indexed search scope UI).
+## Milestone M6 — Indexed Filename Search [COMPLETE]
+
+### Step 1: SQLite FTS5 Schema, Triggers & Root Management
+- Implemented `crates/explorer-index/src/db.rs`:
+  - `IndexDb`: Dedicated SQLite database at `%LOCALAPPDATA%\RustExplorer\index.sqlite3` with WAL mode and `NORMAL` synchronous settings.
+  - Tables: `roots` (max 8 non-overlapping roots), `entries` (authoritative UTF-16LE paths, display paths, kinds, sizes, timestamps, epochs), and `filename_fts` virtual table using `tokenize='trigram'`.
+  - Automatic synchronization triggers: `entries_ai`, `entries_ad`, and `entries_au` ensure every insert, delete, or update in `entries` transactionally synchronizes normalized lowercase filenames in `filename_fts`.
+  - Enforces non-overlapping root hierarchies: rejects duplicate paths and parent/child subpath overlaps using canonical path checks.
+  - Unit test `test_index_db_schema_roots_and_triggers` verifies schema creation, root constraints, and trigger-maintained FTS rows.
+
+### Step 2: Safe Bounded Metadata Crawler
+- Implemented `crates/explorer-index/src/crawl.rs`:
+  - `MetadataCrawler`: Breadth-first metadata-only directory crawler using native Win32 `FindFirstFileExW`. Never reads file contents or hydrates placeholders.
+  - Reparse point safety: Section 14.4 requirement fulfilled—reparse points (symlinks, junctions) have their entry metadata indexed without traversing into their targets.
+  - Default exclusions: automatically skips `$Recycle.Bin`, `System Volume Information`, and `%LOCALAPPDATA%\RustExplorer`.
+  - Paced transactional batching: flushes entries every 500 items or 100 ms to avoid locking the database.
+  - Epoch-based tracking: marks seen entries per scan epoch; removes missing children only after successful directory completion; supports cooperative cancellation.
+  - Unit test `test_crawler_indexes_files_and_skips_exclusions` verifies file discovery, exclusion skipping, and reparse point handling.
+
+### Step 3: Section 14.2 Search Query Engine & Trigram Ranking
+- Implemented `crates/explorer-index/src/query.rs`:
+  - `parse_query`: Implements Section 14.2 grammar: handles plain terms, `"quoted phrases"`, `ext:<ext>` filters, and `type:folder` / `type:file` filters.
+  - Enforces minimum 3-character rule for substring search unless metadata-only query (`ext:` / `type:`).
+  - Trigram ranking: ranks exact normalized filename matches first (`rank = 1`), prefix matches second (`rank = 2`), and substring matches third (`rank = 3`). Tie-breaks deterministically by normalized name, path bytes, and row ID.
+  - Keyset / offset pagination: enforces 1,000 matches cap with `is_capped` indicator and 100 results per page.
+  - Unit tests `test_parse_query_valid_and_invalid` and `test_execute_search_ranking_and_filters` verify ranking, extensions, and phrase matching.
+
+### Step 4: Index Service & Tauri Host Integration
+- Implemented `crates/explorer-index/src/service.rs`:
+  - `IndexService`: Thread-safe service coordinating roots, background crawler threads, and query engine.
+  - Background crawler worker threads: spawns dedicated OS threads with their own runtime, preventing lockups.
+- Updated `apps/desktop/src-tauri`:
+  - `state.rs`: Registered `IndexService` in `AppState`.
+  - `commands.rs`: Added IPC commands `list_indexed_roots`, `add_indexed_root`, `remove_indexed_root`, `recrawl_indexed_root`, `search_indexed`, and `open_path`.
+  - `lib.rs`: Registered all 6 commands in Tauri `generate_handler![]`.
+
+### Step 5: Frontend Search UI & Root Management
+- Updated `apps/desktop/ui`:
+  - `bridge/client.ts` & `bridge/types.ts`: Typed TypeScript bindings for indexed search and root management.
+  - Search Scope Switcher: `[ Folder | Indexed ]` toggle button group next to search bar in the toolbar.
+  - Debounced Search: 150 ms debounce with cancellation token on superseded queries; displays query constraint messages ("Use at least 3 characters for indexed search") and loading spinner.
+  - Virtualized Results View: Displays search results table with columns (Name, Location, Size, Date modified), file icons, and match count with cap warning ("First 1,000 matches; refine search").
+  - Double-Click & Context Menu Actions: Double-click navigates into folders or opens files; right-click context menu offers "Open", "Open containing folder", and "Copy path".
+  - Keyboard Navigation: Arrow keys navigate search results, Enter opens selected result, Escape clears query.
+  - Sidebar Indexed Roots Section: Displays up to 8 roots with live status badges (`ready`, `scanning`, `degraded`, etc.), "+ Index current folder" button, recrawl button (🔄), and remove button (×).
+
+### Step 6: Verification & Packaging
+- Fast verification suite `.\scripts\check.ps1` passed 100% (format, clippy with `-D warnings`, 30 Rust workspace tests, TypeScript strict typecheck, Vitest unit tests, UI build, and doctor).
+- Built debug desktop binary `target\debug\rust-explorer.exe` via `cargo build --package rust-explorer`.
+
+**Next Milestone**: Milestone M7 — Hardening and Performance (100k-entry stress verification, virtualization stability, resource limits, and security audit).
+
 

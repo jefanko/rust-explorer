@@ -54,7 +54,13 @@ pub fn run() {
             commands::watch_folder,
             commands::unwatch_folder,
             commands::unwatch_all,
-            commands::get_watch_status
+            commands::get_watch_status,
+            commands::list_indexed_roots,
+            commands::add_indexed_root,
+            commands::remove_indexed_root,
+            commands::recrawl_indexed_root,
+            commands::search_indexed,
+            commands::open_path
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

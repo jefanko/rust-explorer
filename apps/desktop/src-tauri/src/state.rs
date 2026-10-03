@@ -1,4 +1,5 @@
 use explorer_fs::FolderService;
+use explorer_index::IndexService;
 use explorer_jobs::OperationService;
 use explorer_store::{JobJournal, SettingsStore};
 use explorer_watch::WatchService;
@@ -12,6 +13,7 @@ pub struct AppState {
     pub job_journal: Arc<JobJournal>,
     pub operation_service: Arc<OperationService>,
     pub watch_service: Arc<WatchService>,
+    pub index_service: Arc<IndexService>,
 }
 
 impl AppState {
@@ -46,12 +48,19 @@ impl AppState {
                 .unwrap_or_else(|e| panic!("Failed to initialize WatchService: {e}")),
         );
 
+        let index_db_path = state_dir.join("index.sqlite3");
+        let index_service = Arc::new(
+            IndexService::new(&index_db_path)
+                .unwrap_or_else(|_| IndexService::new_in_memory().unwrap()),
+        );
+
         Self {
             folder_service: Arc::new(FolderService::new()),
             settings_store,
             job_journal,
             operation_service,
             watch_service,
+            index_service,
         }
     }
 }

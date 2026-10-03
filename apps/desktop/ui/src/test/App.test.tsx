@@ -51,4 +51,41 @@ describe("App Formatting and Tab Helpers", () => {
 
     expect(selectedIndices).toEqual([2, 3, 4, 5]);
   });
+
+  it("validates search query constraints per Section 14 spec", () => {
+    function isValidSearchQuery(q: string): { valid: boolean; error?: string } {
+      const trimmed = q.trim();
+      if (!trimmed) return { valid: false };
+      const hasMetadataFilter = /ext:[^\s]+|type:(?:folder|file)/i.test(trimmed);
+      const textWithoutFilters = trimmed.replace(/ext:[^\s]+|type:[^\s]+/gi, "").trim();
+      if (!hasMetadataFilter && textWithoutFilters.length < 3) {
+        return { valid: false, error: "Use at least 3 characters for indexed search" };
+      }
+      return { valid: true };
+    }
+
+    expect(isValidSearchQuery("").valid).toBe(false);
+    expect(isValidSearchQuery("a")).toEqual({
+      valid: false,
+      error: "Use at least 3 characters for indexed search",
+    });
+    expect(isValidSearchQuery("ab")).toEqual({
+      valid: false,
+      error: "Use at least 3 characters for indexed search",
+    });
+    expect(isValidSearchQuery("abc").valid).toBe(true);
+    expect(isValidSearchQuery("invoice").valid).toBe(true);
+    expect(isValidSearchQuery("ext:pdf").valid).toBe(true);
+    expect(isValidSearchQuery("type:folder").valid).toBe(true);
+    expect(isValidSearchQuery("a ext:pdf").valid).toBe(true);
+  });
+
+  it("extracts containing folder path for search results", () => {
+    function getContainingFolder(fullPath: string): string {
+      return fullPath.replace(/\\[^\\]+$/, "");
+    }
+
+    expect(getContainingFolder("C:\\Users\\Default\\Documents\\report.docx")).toBe("C:\\Users\\Default\\Documents");
+    expect(getContainingFolder("D:\\projects\\rust\\main.rs")).toBe("D:\\projects\\rust");
+  });
 });

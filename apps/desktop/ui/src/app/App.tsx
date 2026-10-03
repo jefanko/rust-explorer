@@ -8,6 +8,8 @@ import {
   KnownFolderItem,
   SortColumn,
   SortDirection,
+  IndexedRoot,
+  SearchResultItem,
 } from "../bridge/types";
 
 function formatBytes(bytes?: number | null): string {
@@ -33,7 +35,7 @@ function formatFiletime(filetime?: number | null): string {
   });
 }
 
-function getFileIcon(entry: FileEntry) {
+function getFileIcon(entry: { kind: string; extension: string }) {
   if (entry.kind === "directory") {
     return "📁";
   }
@@ -81,6 +83,7 @@ interface ContextMenuState {
   x: number;
   y: number;
   entry?: FileEntry;
+  searchResult?: SearchResultItem;
 }
 
 interface ModalState {
@@ -135,6 +138,19 @@ export default function App() {
   const [jobs, setJobs] = useState<JobSummary[]>([]);
   const [showJobsDrawer, setShowJobsDrawer] = useState<boolean>(false);
 
+  // Search state
+  const [searchScope, setSearchScope] = useState<"folder" | "indexed">("folder");
+  const [indexedSearchQuery, setIndexedSearchQuery] = useState<string>("");
+  const [searchResults, setSearchResults] = useState<SearchResultItem[]>([]);
+  const [searchTotalMatches, setSearchTotalMatches] = useState<number>(0);
+  const [searchIsCapped, setSearchIsCapped] = useState<boolean>(false);
+  const [searchLoading, setSearchLoading] = useState<boolean>(false);
+  const [searchError, setSearchError] = useState<string | null>(null);
+  const [selectedSearchIndex, setSelectedSearchIndex] = useState<number>(-1);
+
+  // Indexed roots state
+  const [indexedRoots, setIndexedRoots] = useState<IndexedRoot[]>([]);
+
   // Refs for element focus and callbacks
   const addressInputRef = useRef<HTMLInputElement>(null);
   const filterInputRef = useRef<HTMLInputElement>(null);
@@ -160,6 +176,15 @@ export default function App() {
 
   const rowVirtualizer = useVirtualizer({
     count: displayedEntries.length,
+    getScrollElement: () => parentRef.current,
+    estimateSize: () => 32,
+    overscan: 20,
+  });
+
+  const isSearchActive = searchScope === "indexed" && Boolean(indexedSearchQuery.trim());
+
+  const searchVirtualizer = useVirtualizer({
+    count: searchResults.length,
     getScrollElement: () => parentRef.current,
     estimateSize: () => 32,
     overscan: 20,
@@ -284,18 +309,144 @@ export default function App() {
     }
   }
 
+  // Indexed roots operations
+  async function loadIndexedRoots() {
+    try {
+      const roots = await client.listIndexedRoots();
+      setIndexedRoots(roots);
+    } catch (err) {
+      console.error("Failed to load indexed roots:", err);
+    }
+  }
+
+  async function handleIndexCurrentFolder() {
+    if (!activeTab.path) return;
+    try {
+      await client.addIndexedRoot(activeTab.path);
+      await loadIndexedRoots();
+    } catch (err: any) {
+      alert(err?.user_message || err?.message || "Failed to index current folder");
+    }
+  }
+
+  async function handleRemoveRoot(rootId: string) {
+    try {
+      await client.removeIndexedRoot(rootId);
+      await loadIndexedRoots();
+    } catch (err: any) {
+      console.error("Failed to remove indexed root:", err);
+    }
+  }
+
+  async function handleRecrawlRoot(rootId: string) {
+    try {
+      await client.recrawlIndexedRoot(rootId);
+      await loadIndexedRoots();
+    } catch (err: any) {
+      console.error("Failed to recrawl indexed root:", err);
+    }
+  }
+
+  async function handleSearchResultDoubleClick(item: SearchResultItem) {
+    if (item.kind === "directory") {
+      navigateToPath(item.path);
+    } else {
+      try {
+        const nav = await client.openPath(item.path);
+        if (nav) {
+          navigateToPath(nav.path_display);
+        }
+      } catch (err: any) {
+        alert(err?.user_message || err?.message || `Failed to open ${item.display_name}`);
+      }
+    }
+  }
+
+  function handleSearchResultContextMenu(item: SearchResultItem, e: React.MouseEvent) {
+    e.preventDefault();
+    e.stopPropagation();
+    setContextMenu({
+      x: e.clientX,
+      y: e.clientY,
+      searchResult: item,
+    });
+  }
+
+  // Poll for status updates if any indexed root is scanning
+  useEffect(() => {
+    const hasScanning = indexedRoots.some((r) => r.state === "scanning");
+    if (!hasScanning) return;
+    const interval = setInterval(loadIndexedRoots, 2000);
+    return () => clearInterval(interval);
+  }, [indexedRoots]);
+
+  // Debounced indexed search with query validation and cancellation
+  useEffect(() => {
+    if (searchScope !== "indexed") return;
+    const q = indexedSearchQuery.trim();
+    if (!q) {
+      setSearchResults([]);
+      setSearchTotalMatches(0);
+      setSearchIsCapped(false);
+      setSearchLoading(false);
+      setSearchError(null);
+      setSelectedSearchIndex(-1);
+      return;
+    }
+
+    const hasMetadataFilter = /ext:[^\s]+|type:(?:folder|file)/i.test(q);
+    const textWithoutFilters = q.replace(/ext:[^\s]+|type:[^\s]+/gi, "").trim();
+    if (!hasMetadataFilter && textWithoutFilters.length < 3) {
+      setSearchResults([]);
+      setSearchTotalMatches(0);
+      setSearchIsCapped(false);
+      setSearchLoading(false);
+      setSearchError("Use at least 3 characters for indexed search");
+      setSelectedSearchIndex(-1);
+      return;
+    }
+
+    setSearchLoading(true);
+    setSearchError(null);
+
+    let canceled = false;
+    const timer = setTimeout(async () => {
+      try {
+        const resp = await client.searchIndexed(q, null, 1, 100);
+        if (!canceled) {
+          setSearchResults(resp.results);
+          setSearchTotalMatches(resp.total_matches);
+          setSearchIsCapped(resp.is_capped);
+          setSearchLoading(false);
+          setSelectedSearchIndex(-1);
+        }
+      } catch (err: any) {
+        if (!canceled) {
+          setSearchError(err?.user_message || err?.message || "Search failed");
+          setSearchLoading(false);
+        }
+      }
+    }, 150);
+
+    return () => {
+      canceled = true;
+      clearTimeout(timer);
+    };
+  }, [searchScope, indexedSearchQuery]);
+
   // Bootstrap app and load settings
   useEffect(() => {
     let mounted = true;
 
-    Promise.all([client.bootstrap(), client.loadSettings(), client.listJobs(20)])
-      .then(([bootData, settings, jobList]) => {
+    Promise.all([client.bootstrap(), client.loadSettings(), client.listJobs(20), client.listIndexedRoots()])
+      .then(([bootData, settings, jobList, rootsList]) => {
         if (!mounted) return;
         setKnownFolders(bootData.known_folders);
         setDrives(bootData.drives);
         setFavorites(settings.favorites || []);
         setTheme(settings.theme || "system");
         setJobs(jobList || []);
+        setIndexedRoots(rootsList || []);
         applyTheme(settings.theme || "system");
 
         if (settings.restore_tabs && settings.saved_tabs && settings.saved_tabs.length > 0) {
@@ -1012,6 +1163,31 @@ export default function App() {
         return;
       }
 
+      // Indexed search results keyboard navigation
+      if (isSearchActive) {
+        if (e.key === "ArrowDown") {
+          e.preventDefault();
+          setSelectedSearchIndex((prev) => Math.min(prev + 1, searchResults.length - 1));
+          return;
+        }
+        if (e.key === "ArrowUp") {
+          e.preventDefault();
+          setSelectedSearchIndex((prev) => Math.max(prev - 1, 0));
+          return;
+        }
+        if (e.key === "Enter") {
+          if (selectedSearchIndex >= 0 && selectedSearchIndex < searchResults.length) {
+            e.preventDefault();
+            handleSearchResultDoubleClick(searchResults[selectedSearchIndex]);
+          }
+          return;
+        }
+        if (e.key === "Escape") {
+          setIndexedSearchQuery("");
+          return;
+        }
+      }
+
       // Alt+Enter -> Native properties
       if (e.altKey && e.key === "Enter") {
         e.preventDefault();
@@ -1028,7 +1204,7 @@ export default function App() {
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [displayedEntries, contextMenu, modal, showJobsDrawer]);
+  }, [displayedEntries, contextMenu, modal, showJobsDrawer, isSearchActive, searchResults, selectedSearchIndex]);
 
   return (
     <div className="app-container" onContextMenu={handleBackgroundContextMenu}>
@@ -1163,15 +1339,54 @@ export default function App() {
           </form>
 
           <div className="search-container">
-            <input
-              ref={filterInputRef}
-              type="text"
-              className="search-input"
-              placeholder="Filter current folder (Ctrl+F)"
-              value={activeTab.filterQuery}
-              onChange={(e) => updateActiveTab({ filterQuery: e.target.value })}
-              aria-label="Filter"
-            />
+            <div className="search-scope-switcher">
+              <button
+                type="button"
+                className={`scope-btn ${searchScope === "folder" ? "active" : ""}`}
+                onClick={() => {
+                  setSearchScope("folder");
+                  filterInputRef.current?.focus();
+                }}
+                title="Filter items in current folder"
+              >
+                Folder
+              </button>
+              <button
+                type="button"
+                className={`scope-btn ${searchScope === "indexed" ? "active" : ""}`}
+                onClick={() => {
+                  setSearchScope("indexed");
+                  filterInputRef.current?.focus();
+                }}
+                title="Search indexed roots (SQLite FTS5)"
+              >
+                Indexed
+              </button>
+            </div>
+            <div className="search-input-wrapper">
+              <input
+                ref={filterInputRef}
+                type="text"
+                className="search-input"
+                placeholder={
+                  searchScope === "folder"
+                    ? "Filter current folder (Ctrl+F)"
+                    : "Search indexed (e.g. invoice ext:pdf)..."
+                }
+                value={searchScope === "folder" ? activeTab.filterQuery : indexedSearchQuery}
+                onChange={(e) => {
+                  if (searchScope === "folder") {
+                    updateActiveTab({ filterQuery: e.target.value });
+                  } else {
+                    setIndexedSearchQuery(e.target.value);
+                  }
+                }}
+                aria-label={searchScope === "folder" ? "Filter" : "Search"}
+              />
+              {searchScope === "indexed" && searchLoading && (
+                <span className="search-spinner" title="Searching...">⏳</span>
+              )}
+            </div>
           </div>
 
           <button
@@ -1261,118 +1476,296 @@ export default function App() {
               ))}
             </ul>
           </section>
+
+          {/* Indexed Roots */}
+          <section className="sidebar-section">
+            <div className="sidebar-section-header">
+              <h3>Indexed Roots ({indexedRoots.length}/8)</h3>
+              <button
+                className="sidebar-add-btn"
+                title="Index current folder"
+                disabled={indexedRoots.length >= 8 || !activeTab.path}
+                onClick={handleIndexCurrentFolder}
+              >
+                +
+              </button>
+            </div>
+            {indexedRoots.length === 0 ? (
+              <div className="sidebar-empty-note">
+                No indexed roots
+                {activeTab.path && (
+                  <button
+                    className="btn-link"
+                    onClick={handleIndexCurrentFolder}
+                  >
+                    Index current folder
+                  </button>
+                )}
+              </div>
+            ) : (
+              <ul className="indexed-roots-list">
+                {indexedRoots.map((root) => (
+                  <li key={root.id} className="indexed-root-item">
+                    <div
+                      className="indexed-root-info"
+                      onClick={() => navigateToPath(root.path)}
+                      title={`Path: ${root.display_path}\nState: ${root.state}\nEpoch: ${root.completed_epoch}`}
+                    >
+                      <span className="root-name">{getTabTitle(root.path)}</span>
+                      <span className={`root-badge badge-${root.state}`}>{root.state}</span>
+                    </div>
+                    <div className="root-actions">
+                      <button
+                        className="root-recrawl-btn"
+                        title="Re-crawl index"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handleRecrawlRoot(root.id);
+                        }}
+                      >
+                        🔄
+                      </button>
+                      <button
+                        className="fav-remove-btn"
+                        title="Remove from index"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handleRemoveRoot(root.id);
+                        }}
+                      >
+                        ×
+                      </button>
+                    </div>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </section>
         </aside>
 
         {/* Content Pane */}
         <main className="content-pane" role="region" aria-label="Folder contents">
-          <div className="file-table-header">
-            <span
-              className={`col col-name sortable ${activeTab.sortColumn === "name" ? "sorted" : ""}`}
-              onClick={() => handleSort("name")}
-            >
-              Name {activeTab.sortColumn === "name" && (activeTab.sortDirection === "ascending" ? "▲" : "▼")}
-            </span>
-            <span
-              className={`col col-type sortable ${activeTab.sortColumn === "type" ? "sorted" : ""}`}
-              onClick={() => handleSort("type")}
-            >
-              Type {activeTab.sortColumn === "type" && (activeTab.sortDirection === "ascending" ? "▲" : "▼")}
-            </span>
-            <span
-              className={`col col-size sortable ${activeTab.sortColumn === "size" ? "sorted" : ""}`}
-              onClick={() => handleSort("size")}
-            >
-              Size {activeTab.sortColumn === "size" && (activeTab.sortDirection === "ascending" ? "▲" : "▼")}
-            </span>
-            <span
-              className={`col col-date sortable ${activeTab.sortColumn === "modified" ? "sorted" : ""}`}
-              onClick={() => handleSort("modified")}
-            >
-              Date modified {activeTab.sortColumn === "modified" && (activeTab.sortDirection === "ascending" ? "▲" : "▼")}
-            </span>
-          </div>
+          {isSearchActive ? (
+            <>
+              <div className="file-table-header">
+                <span className="col col-name">Name</span>
+                <span className="col col-path">Location</span>
+                <span className="col col-size">Size</span>
+                <span className="col col-date">Date modified</span>
+              </div>
 
-          <div
-            className="file-table-body"
-            ref={parentRef}
-            onContextMenu={handleBackgroundContextMenu}
-          >
-            {activeTab.error && (
-              <div className="error-banner">
-                <p>⚠️ {activeTab.error}</p>
-              </div>
-            )}
-
-            {activeTab.loading && activeTab.entries.length === 0 ? (
-              <div className="empty-state">
-                <p>Loading folder contents...</p>
-              </div>
-            ) : displayedEntries.length === 0 ? (
-              <div className="empty-state">
-                <p>This folder is empty.</p>
-              </div>
-            ) : (
               <div
-                style={{
-                  height: `${rowVirtualizer.getTotalSize()}px`,
-                  width: "100%",
-                  position: "relative",
-                }}
+                className="file-table-body"
+                ref={parentRef}
+                onContextMenu={handleBackgroundContextMenu}
               >
-                {rowVirtualizer.getVirtualItems().map((virtualRow) => {
-                  const entry = displayedEntries[virtualRow.index];
-                  const isSelected = activeTab.selectedTokens.has(entry.token);
+                {searchError && (
+                  <div className="error-banner">
+                    <p>⚠️ {searchError}</p>
+                  </div>
+                )}
 
-                  return (
-                    <div
-                      key={entry.token}
-                      className={`file-row ${isSelected ? "selected" : ""}`}
-                      onClick={(e) => handleRowClick(entry, virtualRow.index, e)}
-                      onDoubleClick={() => handleItemDoubleClick(entry)}
-                      onContextMenu={(e) => handleRowContextMenu(entry, e)}
-                      style={{
-                        position: "absolute",
-                        top: 0,
-                        left: 0,
-                        width: "100%",
-                        height: `${virtualRow.size}px`,
-                        transform: `translateY(${virtualRow.start}px)`,
-                      }}
-                    >
-                      <span className="col col-name file-name-cell">
-                        <span className="file-icon">{getFileIcon(entry)}</span>
-                        <span className="file-name" title={entry.display_name}>
-                          {entry.display_name}
-                        </span>
-                      </span>
-                      <span className="col col-type">
-                        {entry.kind === "directory"
-                          ? "File folder"
-                          : entry.extension
-                          ? `${entry.extension.toUpperCase()} File`
-                          : "File"}
-                      </span>
-                      <span className="col col-size">
-                        {formatBytes(entry.size_bytes)}
-                      </span>
-                      <span className="col col-date">
-                        {formatFiletime(entry.modified_filetime)}
-                      </span>
-                    </div>
-                  );
-                })}
+                {searchLoading && searchResults.length === 0 ? (
+                  <div className="empty-state">
+                    <p>Searching indexed files...</p>
+                  </div>
+                ) : searchResults.length === 0 ? (
+                  <div className="empty-state">
+                    <p>No results found for "{indexedSearchQuery}".</p>
+                  </div>
+                ) : (
+                  <div
+                    style={{
+                      height: `${searchVirtualizer.getTotalSize()}px`,
+                      width: "100%",
+                      position: "relative",
+                    }}
+                  >
+                    {searchVirtualizer.getVirtualItems().map((virtualRow) => {
+                      const item = searchResults[virtualRow.index];
+                      const isSelected = selectedSearchIndex === virtualRow.index;
+
+                      return (
+                        <div
+                          key={item.id}
+                          className={`file-row ${isSelected ? "selected" : ""}`}
+                          onClick={() => setSelectedSearchIndex(virtualRow.index)}
+                          onDoubleClick={() => handleSearchResultDoubleClick(item)}
+                          onContextMenu={(e) => handleSearchResultContextMenu(item, e)}
+                          style={{
+                            position: "absolute",
+                            top: 0,
+                            left: 0,
+                            width: "100%",
+                            height: `${virtualRow.size}px`,
+                            transform: `translateY(${virtualRow.start}px)`,
+                          }}
+                        >
+                          <span className="col col-name file-name-cell">
+                            <span className="file-icon">{getFileIcon(item)}</span>
+                            <span className="file-name" title={item.display_name}>
+                              {item.display_name}
+                            </span>
+                          </span>
+                          <span className="col col-path" title={item.path}>
+                            {item.path}
+                          </span>
+                          <span className="col col-size">
+                            {formatBytes(item.size_bytes)}
+                          </span>
+                          <span className="col col-date">
+                            {formatFiletime(item.modified_filetime)}
+                          </span>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
               </div>
-            )}
-          </div>
+            </>
+          ) : searchScope === "indexed" ? (
+            <>
+              <div className="file-table-header">
+                <span className="col col-name">Name</span>
+                <span className="col col-path">Location</span>
+                <span className="col col-size">Size</span>
+                <span className="col col-date">Date modified</span>
+              </div>
+              <div
+                className="file-table-body"
+                ref={parentRef}
+                onContextMenu={handleBackgroundContextMenu}
+              >
+                <div className="empty-state">
+                  <p>Type at least 3 characters to search across indexed roots.</p>
+                  <p style={{ fontSize: "11px", color: "var(--text-secondary)", marginTop: "4px" }}>
+                    Tip: Use filters like <code>ext:pdf</code>, <code>type:folder</code>, or <code>"exact phrase"</code>.
+                  </p>
+                </div>
+              </div>
+            </>
+          ) : (
+            <>
+              <div className="file-table-header">
+                <span
+                  className={`col col-name sortable ${activeTab.sortColumn === "name" ? "sorted" : ""}`}
+                  onClick={() => handleSort("name")}
+                >
+                  Name {activeTab.sortColumn === "name" && (activeTab.sortDirection === "ascending" ? "▲" : "▼")}
+                </span>
+                <span
+                  className={`col col-type sortable ${activeTab.sortColumn === "type" ? "sorted" : ""}`}
+                  onClick={() => handleSort("type")}
+                >
+                  Type {activeTab.sortColumn === "type" && (activeTab.sortDirection === "ascending" ? "▲" : "▼")}
+                </span>
+                <span
+                  className={`col col-size sortable ${activeTab.sortColumn === "size" ? "sorted" : ""}`}
+                  onClick={() => handleSort("size")}
+                >
+                  Size {activeTab.sortColumn === "size" && (activeTab.sortDirection === "ascending" ? "▲" : "▼")}
+                </span>
+                <span
+                  className={`col col-date sortable ${activeTab.sortColumn === "modified" ? "sorted" : ""}`}
+                  onClick={() => handleSort("modified")}
+                >
+                  Date modified {activeTab.sortColumn === "modified" && (activeTab.sortDirection === "ascending" ? "▲" : "▼")}
+                </span>
+              </div>
+
+              <div
+                className="file-table-body"
+                ref={parentRef}
+                onContextMenu={handleBackgroundContextMenu}
+              >
+                {activeTab.error && (
+                  <div className="error-banner">
+                    <p>⚠️ {activeTab.error}</p>
+                  </div>
+                )}
+
+                {activeTab.loading && activeTab.entries.length === 0 ? (
+                  <div className="empty-state">
+                    <p>Loading folder contents...</p>
+                  </div>
+                ) : displayedEntries.length === 0 ? (
+                  <div className="empty-state">
+                    <p>This folder is empty.</p>
+                  </div>
+                ) : (
+                  <div
+                    style={{
+                      height: `${rowVirtualizer.getTotalSize()}px`,
+                      width: "100%",
+                      position: "relative",
+                    }}
+                  >
+                    {rowVirtualizer.getVirtualItems().map((virtualRow) => {
+                      const entry = displayedEntries[virtualRow.index];
+                      const isSelected = activeTab.selectedTokens.has(entry.token);
+
+                      return (
+                        <div
+                          key={entry.token}
+                          className={`file-row ${isSelected ? "selected" : ""}`}
+                          onClick={(e) => handleRowClick(entry, virtualRow.index, e)}
+                          onDoubleClick={() => handleItemDoubleClick(entry)}
+                          onContextMenu={(e) => handleRowContextMenu(entry, e)}
+                          style={{
+                            position: "absolute",
+                            top: 0,
+                            left: 0,
+                            width: "100%",
+                            height: `${virtualRow.size}px`,
+                            transform: `translateY(${virtualRow.start}px)`,
+                          }}
+                        >
+                          <span className="col col-name file-name-cell">
+                            <span className="file-icon">{getFileIcon(entry)}</span>
+                            <span className="file-name" title={entry.display_name}>
+                              {entry.display_name}
+                            </span>
+                          </span>
+                          <span className="col col-type">
+                            {entry.kind === "directory"
+                              ? "File folder"
+                              : entry.extension
+                              ? `${entry.extension.toUpperCase()} File`
+                              : "File"}
+                          </span>
+                          <span className="col col-size">
+                            {formatBytes(entry.size_bytes)}
+                          </span>
+                          <span className="col col-date">
+                            {formatFiletime(entry.modified_filetime)}
+                          </span>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            </>
+          )}
         </main>
       </div>
 
       {/* Status Bar */}
       <footer className="app-statusbar">
         <span>
-          {displayedEntries.length} {displayedEntries.length === 1 ? "item" : "items"}
-          {activeTab.filterQuery && ` (filtered from ${activeTab.totalEntries})`}
-          {activeTab.selectedTokens.size > 0 && ` | ${activeTab.selectedTokens.size} selected`}
+          {isSearchActive ? (
+            <>
+              {searchTotalMatches} {searchTotalMatches === 1 ? "match" : "matches"}
+              {searchIsCapped && " (First 1,000 matches; refine search)"}
+              {selectedSearchIndex >= 0 && " | 1 selected"}
+            </>
+          ) : (
+            <>
+              {displayedEntries.length} {displayedEntries.length === 1 ? "item" : "items"}
+              {activeTab.filterQuery && ` (filtered from ${activeTab.totalEntries})`}
+              {activeTab.selectedTokens.size > 0 && ` | ${activeTab.selectedTokens.size} selected`}
+            </>
+          )}
         </span>
         <span className="status-spacer"></span>
         <button
@@ -1396,7 +1789,42 @@ export default function App() {
           style={{ top: `${contextMenu.y}px`, left: `${contextMenu.x}px` }}
           onClick={(e) => e.stopPropagation()}
         >
-          {contextMenu.entry ? (
+          {contextMenu.searchResult ? (
+            <>
+              <div
+                className="context-menu-item"
+                onClick={() => {
+                  const item = contextMenu.searchResult!;
+                  setContextMenu(null);
+                  handleSearchResultDoubleClick(item);
+                }}
+              >
+                <span>Open</span>
+                <span className="context-menu-shortcut">Enter</span>
+              </div>
+              <div
+                className="context-menu-item"
+                onClick={() => {
+                  const item = contextMenu.searchResult!;
+                  setContextMenu(null);
+                  const parentDir = item.path.replace(/\\[^\\]+$/, "");
+                  navigateToPath(parentDir);
+                }}
+              >
+                <span>Open containing folder</span>
+              </div>
+              <div
+                className="context-menu-item"
+                onClick={() => {
+                  const item = contextMenu.searchResult!;
+                  setContextMenu(null);
+                  client.clipboardWrite([item.path], false);
+                }}
+              >
+                <span>Copy path</span>
+              </div>
+            </>
+          ) : contextMenu.entry ? (
             <>
               <div
                 className="context-menu-item"

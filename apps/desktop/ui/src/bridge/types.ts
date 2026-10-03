@@ -126,4 +126,43 @@ export interface WatchNotification {
   changes: WatchChange[];
 }
 
+export type RootState =
+  | "not_indexed"
+  | "scanning"
+  | "ready"
+  | "degraded"
+  | "offline"
+  | "needs_reconcile"
+  | "error";
+
+export interface IndexedRoot {
+  id: string;
+  path: string;
+  display_path: string;
+  state: RootState;
+  completed_epoch: number;
+  reconciled_at?: string | null;
+}
+
+export interface SearchResultItem {
+  id: number;
+  root_id: string;
+  path: string;
+  display_name: string;
+  extension: string;
+  kind: string;
+  size_bytes?: number | null;
+  modified_filetime?: number | null;
+}
+
+export interface SearchResponse {
+  query: string;
+  results: SearchResultItem[];
+  total_matches: number;
+  is_capped: boolean;
+  page: number;
+  page_size: number;
+}
+
+
 

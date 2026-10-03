@@ -113,4 +113,24 @@ Every entry records: Date (UTC/Local), Milestone, Command executed, Build/Commit
 | 2026-10-03 | M5.2 | `.\scripts\check.ps1` | PASS | Full fast verification suite passed 100%. |
 | 2026-10-03 | M5.2 | `npx tauri build --debug --no-bundle` | PASS | Standalone executable `target\debug\rust-explorer.exe` compiled cleanly with live watching enabled. |
 
+---
+
+### M6 Validation Log
+
+| Date | Step | Command | Result | Evidence / Output |
+|---|---|---|---|---|
+| 2026-10-03 | M6.1 | `cargo test --package explorer-index` | PASS | `test_index_db_schema_roots_and_triggers`: FTS5 schema, trigram virtual table, non-overlapping root limits (max 8), and sync triggers verified. |
+| 2026-10-03 | M6.2 | `cargo test --package explorer-index` | PASS | `test_crawler_indexes_files_and_skips_exclusions`: Verified bounded BFS crawler, exclusion skipping (`$Recycle.Bin`, system files), reparse point non-traversal, and batch commit pacing (500 items/100 ms). |
+| 2026-10-03 | M6.3 | `cargo test --package explorer-index` | PASS | `test_parse_query_valid_and_invalid` & `test_execute_search_ranking_and_filters`: Section 14.2 grammar parsed (terms, phrases, `ext:`, `type:`), 3-char minimum enforced, trigram ranking verified. |
+| 2026-10-03 | M6.3 | `cargo test --package explorer-index` | PASS | `test_index_service_add_search_remove`: Thread-safe IndexService coordinates root additions, background worker crawls, querying, and removals. |
+| 2026-10-03 | M6.4 | `npm run test:unit` | PASS | Vitest suite passes 100% (5 tests) including query constraint validation and parent directory extraction. |
+| 2026-10-03 | M6.4 | `npm run typecheck` | PASS | Strict TypeScript type checking passes with 0 errors across search components and DTOs. |
+| 2026-10-03 | M6.4 | `cargo clippy --workspace --all-targets -- -D warnings` | PASS | Zero warnings across all crates and targets with `-D warnings`. |
+| 2026-10-03 | M6.4 | `cargo test --workspace` | PASS | All 30 unit and integration tests across 7 crates pass 100%. |
+| 2026-10-03 | M6.4 | `npm run build:ui` | PASS | Vite production build compiled (`dist/index.html`, CSS, JS bundles). |
+| 2026-10-03 | M6.4 | `cargo xtask doctor` | PASS | Verified git, node, npm, and bundled SQLite FTS5 trigram capability. |
+| 2026-10-03 | M6.4 | `.\scripts\check.ps1` | PASS | Full fast verification suite passes 100%. |
+| 2026-10-03 | M6.4 | `cargo build --package rust-explorer` | PASS | Standalone executable `target\debug\rust-explorer.exe` compiled cleanly with indexed search and UI scope switcher. |
+
+
 

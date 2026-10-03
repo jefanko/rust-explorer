@@ -50,19 +50,25 @@
   - Webview bridge receiving `"watch-notification"` events and automatically refreshing visible directory listings.
   - Fast verification suite passed (`.\scripts\check.ps1`, 25 tests, 0 warnings) and debug desktop binary packaged.
 
+- **Milestone M6 — Indexed Filename Search**: 100% COMPLETE.
+  - Dedicated SQLite FTS5 index at `%LOCALAPPDATA%\RustExplorer\index.sqlite3` with `tokenize='trigram'` and transactional sync triggers.
+  - Non-overlapping root limit (maximum 8 roots) enforced by canonical native paths.
+  - Bounded BFS metadata crawler using native Win32 `FindFirstFileExW`, batch commit pacing (500 items/100 ms), reparse point non-traversal, and default exclusions (`$Recycle.Bin`, `System Volume Information`, app data).
+  - Section 14.2 search query parser supporting terms, `"quoted phrases"`, `ext:`, `type:folder`/`type:file`, 3+ character minimum rule, and trigram ranking (exact > prefix > substring).
+  - UI Search scope switcher (`[ Folder | Indexed ]`), 150 ms debounced query execution with request cancellation, virtualized results list, match count capping at 1,000 matches, and sidebar Indexed Roots manager with live status badges.
+  - Fast verification suite passed (`.\scripts\check.ps1`, 30 tests, 0 warnings) and standalone desktop binary packaged.
+
 ## Current Milestone
-- **Milestone**: M6 — Indexed Filename Search
+- **Milestone**: M7 — Hardening and Performance
 - **Active Tickets**:
-  - `M6.1 SQLite FTS5 Setup`: Authoritative metadata table and FTS5 trigram table with sync triggers.
-  - `M6.2 Metadata Crawler`: Safe non-recursive reparse point crawling, background throttling.
-  - `M6.3 Search Query Engine`: Query parser (terms, phrases, `ext:`, `type:`), ranking, paged results.
-  - `M6.4 Search UI`: Current folder filter and indexed search scope switcher.
+  - `M7.1 100k-Entry Stress Verification`: Virtualization and memory stability test on 100k items.
+  - `M7.2 Resource Limits & Leak Prevention`: Audit handle, memory, and channel bounds.
+  - `M7.3 Security Audit`: CSP review, IPC authority checks, input sanitization.
 
 ## Next Commands
-1. Review `crates/explorer-index` crate structure and dependencies.
-2. Implement SQLite schema with `roots`, `entries`, and `filename_fts` virtual table using the trigram tokenizer.
-3. Add sync triggers ensuring FTS5 table stays consistent with entries metadata on insert, update, and delete.
-4. Implement metadata crawler respecting exclusion paths, reparse point skipping, and batch commit pacing (500 entries or 100 ms).
-5. Implement search query parser supporting terms, phrases (`"..."`), `ext:`, `type:`, and trigram ranking.
-6. Connect search IPC commands to Tauri and add search scope switcher in UI.
+1. Review Section 23 Performance Budget and Section 24 Stress Scenarios in `RUST_WINDOWS_EXPLORER_AGENT_SPEC.md`.
+2. Implement 100k-entry synthetic fixture stress verification to ensure table scrolling stays >= 55 FPS and memory stays bounded within 200 MB.
+3. Audit Windows handles and watcher subscriptions under rapid tab cycling and cancellation.
+4. Perform security audit on Tauri IPC commands, path canonicalization, and Content Security Policy.
+
 

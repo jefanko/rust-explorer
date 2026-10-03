@@ -38,11 +38,11 @@
 - [x] **M5.1 Directory Watching**: `notify` backend integration for visible folders and indexed roots.
 - [x] **M5.2 Coalescing & Reconciliation**: Event batching, debounce, dirty-root tracking, and overflow recovery.
 
-## Milestone M6 — Indexed Filename Search
-- [ ] **M6.1 SQLite FTS5 Setup**: Authoritative metadata table and FTS5 trigram table with sync triggers.
-- [ ] **M6.2 Metadata Crawler**: Safe non-recursive reparse point crawling, background throttling.
-- [ ] **M6.3 Search Query Engine**: Query parser (terms, phrases, `ext:`, `type:`), ranking, paged results.
-- [ ] **M6.4 Search UI**: Current folder filter and indexed search scope switcher.
+## Milestone M6 — Indexed Filename Search [COMPLETE]
+- [x] **M6.1 SQLite FTS5 Setup**: Authoritative metadata table and FTS5 trigram table with sync triggers.
+- [x] **M6.2 Metadata Crawler**: Safe non-recursive reparse point crawling, background throttling.
+- [x] **M6.3 Search Query Engine**: Query parser (terms, phrases, `ext:`, `type:`), ranking, paged results.
+- [x] **M6.4 Search UI**: Current folder filter and indexed search scope switcher.
 
 ## Milestone M7 — Hardening and Performance
 - [ ] **M7.1 100k-Entry Stress Verification**: Virtualization and memory stability test on 100k items.
