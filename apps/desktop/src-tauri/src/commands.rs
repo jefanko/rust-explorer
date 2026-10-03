@@ -10,7 +10,8 @@ use explorer_win::known_folders::{get_logical_drives, get_standard_known_folders
 use explorer_win::shell::{
     open_file_with_association, open_in_windows_explorer, show_file_properties,
 };
-use std::path::Path;
+use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
 use tauri::State;
 
 #[tauri::command]
@@ -303,4 +304,94 @@ pub async fn list_jobs(
     state
         .operation_service
         .list_recent_jobs(limit.unwrap_or(20))
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClipboardPayload {
+    pub paths: Vec<String>,
+    pub is_cut: bool,
+}
+
+#[tauri::command]
+pub async fn plan_copy(
+    sources: Vec<String>,
+    destination: String,
+    state: State<'_, AppState>,
+) -> Result<OperationPlan, ExplorerError> {
+    let source_paths: Vec<PathBuf> = sources.into_iter().map(PathBuf::from).collect();
+    let dest_path = PathBuf::from(destination);
+    state.operation_service.plan_copy(&source_paths, &dest_path)
+}
+
+#[tauri::command]
+pub async fn plan_move(
+    sources: Vec<String>,
+    destination: String,
+    state: State<'_, AppState>,
+) -> Result<OperationPlan, ExplorerError> {
+    let source_paths: Vec<PathBuf> = sources.into_iter().map(PathBuf::from).collect();
+    let dest_path = PathBuf::from(destination);
+    state.operation_service.plan_move(&source_paths, &dest_path)
+}
+
+#[tauri::command]
+pub async fn plan_recycle(
+    sources: Vec<String>,
+    state: State<'_, AppState>,
+) -> Result<OperationPlan, ExplorerError> {
+    let source_paths: Vec<PathBuf> = sources.into_iter().map(PathBuf::from).collect();
+    state.operation_service.plan_recycle(&source_paths)
+}
+
+#[tauri::command]
+pub async fn execute_copy(
+    sources: Vec<String>,
+    destination: String,
+    state: State<'_, AppState>,
+) -> Result<JobSummary, ExplorerError> {
+    let source_paths: Vec<PathBuf> = sources.into_iter().map(PathBuf::from).collect();
+    let dest_path = PathBuf::from(destination);
+    state
+        .operation_service
+        .execute_copy(&source_paths, &dest_path)
+}
+
+#[tauri::command]
+pub async fn execute_move(
+    sources: Vec<String>,
+    destination: String,
+    state: State<'_, AppState>,
+) -> Result<JobSummary, ExplorerError> {
+    let source_paths: Vec<PathBuf> = sources.into_iter().map(PathBuf::from).collect();
+    let dest_path = PathBuf::from(destination);
+    state
+        .operation_service
+        .execute_move(&source_paths, &dest_path)
+}
+
+#[tauri::command]
+pub async fn execute_recycle(
+    sources: Vec<String>,
+    state: State<'_, AppState>,
+) -> Result<JobSummary, ExplorerError> {
+    let source_paths: Vec<PathBuf> = sources.into_iter().map(PathBuf::from).collect();
+    state.operation_service.execute_recycle(&source_paths)
+}
+
+#[tauri::command]
+pub async fn clipboard_write(paths: Vec<String>, is_cut: bool) -> Result<(), ExplorerError> {
+    let path_bufs: Vec<PathBuf> = paths.into_iter().map(PathBuf::from).collect();
+    explorer_win::clipboard::write_clipboard_hdrop(&path_bufs, is_cut)
+}
+
+#[tauri::command]
+pub async fn clipboard_read() -> Result<Option<ClipboardPayload>, ExplorerError> {
+    let res = explorer_win::clipboard::read_clipboard_hdrop()?;
+    Ok(res.map(|(paths, is_cut)| ClipboardPayload {
+        paths: paths
+            .into_iter()
+            .map(|p| p.to_string_lossy().to_string())
+            .collect(),
+        is_cut,
+    }))
 }

@@ -8,7 +8,9 @@ license.workspace = true
 explorer-domain.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
+windows-core = "0.58"
 windows = { workspace = true, features = [
+    "implement",
     "Win32_Foundation",
     "Win32_Storage_FileSystem",
     "Win32_System_Com",

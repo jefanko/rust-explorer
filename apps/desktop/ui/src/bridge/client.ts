@@ -4,6 +4,7 @@ import {
   DirectoryPage,
   NavigationResponse,
   AppSettings,
+  ClipboardPayload,
   JobSummary,
   OperationPlan,
   SortColumn,
@@ -138,4 +139,49 @@ export const client = {
   async listJobs(limit?: number): Promise<JobSummary[]> {
     return invoke<JobSummary[]>("list_jobs", { limit });
   },
+
+  async planCopy(
+    sources: string[],
+    destination: string
+  ): Promise<OperationPlan> {
+    return invoke<OperationPlan>("plan_copy", { sources, destination });
+  },
+
+  async planMove(
+    sources: string[],
+    destination: string
+  ): Promise<OperationPlan> {
+    return invoke<OperationPlan>("plan_move", { sources, destination });
+  },
+
+  async planRecycle(sources: string[]): Promise<OperationPlan> {
+    return invoke<OperationPlan>("plan_recycle", { sources });
+  },
+
+  async executeCopy(
+    sources: string[],
+    destination: string
+  ): Promise<JobSummary> {
+    return invoke<JobSummary>("execute_copy", { sources, destination });
+  },
+
+  async executeMove(
+    sources: string[],
+    destination: string
+  ): Promise<JobSummary> {
+    return invoke<JobSummary>("execute_move", { sources, destination });
+  },
+
+  async executeRecycle(sources: string[]): Promise<JobSummary> {
+    return invoke<JobSummary>("execute_recycle", { sources });
+  },
+
+  async clipboardWrite(paths: string[], isCut: boolean): Promise<void> {
+    return invoke<void>("clipboard_write", { paths, isCut });
+  },
+
+  async clipboardRead(): Promise<ClipboardPayload | null> {
+    return invoke<ClipboardPayload | null>("clipboard_read");
+  },
 };
+

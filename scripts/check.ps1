@@ -7,27 +7,24 @@ if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) {
     }
 }
 
+function Run-Step {
+    param([string]$Message, [scriptblock]$Action)
+    Write-Host "`n--> $Message..."
+    & $Action
+    if ($LASTEXITCODE -ne 0) {
+        Write-Error "Verification failed during: $Message (Exit code: $LASTEXITCODE)"
+        exit $LASTEXITCODE
+    }
+}
+
 Write-Host "=== Fast Verification Suite ==="
 
-Write-Host "`n--> Rust formatting check..."
-cargo fmt --all -- --check
-
-Write-Host "`n--> Rust Clippy check..."
-cargo clippy --workspace --all-targets -- -D warnings
-
-Write-Host "`n--> Rust workspace tests..."
-cargo test --workspace
-
-Write-Host "`n--> UI Typecheck..."
-npm run typecheck
-
-Write-Host "`n--> UI Unit tests..."
-npm run test:unit
-
-Write-Host "`n--> UI Production Build..."
-npm run build:ui
-
-Write-Host "`n--> Doctor check..."
-cargo xtask doctor
+Run-Step "Rust formatting check" { cargo fmt --all -- --check }
+Run-Step "Rust Clippy check" { cargo clippy --workspace --all-targets -- -D warnings }
+Run-Step "Rust workspace tests" { cargo test --workspace }
+Run-Step "UI Typecheck" { npm run typecheck }
+Run-Step "UI Unit tests" { npm run test:unit }
+Run-Step "UI Production Build" { npm run build:ui }
+Run-Step "Doctor check" { cargo xtask doctor }
 
 Write-Host "`nAll verification checks PASSED successfully."

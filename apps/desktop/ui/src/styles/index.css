@@ -618,6 +618,15 @@ body {
   background-color: var(--accent-hover);
 }
 
+.modal-btn-danger {
+  background-color: var(--error-text);
+  color: #ffffff;
+}
+
+.modal-btn-danger:hover {
+  opacity: 0.9;
+}
+
 /* Job Drawer */
 .jobs-drawer {
   position: fixed;

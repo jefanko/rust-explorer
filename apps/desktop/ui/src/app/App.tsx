@@ -84,11 +84,12 @@ interface ContextMenuState {
 }
 
 interface ModalState {
-  type: "create_folder" | "rename";
+  type: "create_folder" | "rename" | "recycle";
   title: string;
   value: string;
   folderToken: string;
   itemToken?: string;
+  targetPaths?: string[];
   error?: string | null;
 }
 
@@ -637,20 +638,108 @@ export default function App() {
     }, 50);
   }
 
+  function openRecycleModal(entry?: FileEntry) {
+    const targetTokens = entry
+      ? [entry.token]
+      : Array.from(activeTab.selectedTokens);
+    if (targetTokens.length === 0) return;
+
+    const targetEntries = displayedEntries.filter((e) =>
+      targetTokens.includes(e.token)
+    );
+    if (targetEntries.length === 0) return;
+
+    const paths = targetEntries.map((e) =>
+      activeTab.path
+        ? `${activeTab.path.replace(/[\\/]+$/, "")}\\${e.display_name}`
+        : e.display_name
+    );
+
+    setContextMenu(null);
+    setModal({
+      type: "recycle",
+      title:
+        paths.length === 1
+          ? `Recycle "${targetEntries[0].display_name}"?`
+          : `Recycle ${paths.length} items?`,
+      value: paths.length === 1 ? targetEntries[0].display_name : `${paths.length} items`,
+      folderToken: activeTab.folderToken || "",
+      targetPaths: paths,
+    });
+  }
+
+  async function handleCopy() {
+    if (activeTab.selectedTokens.size === 0) return;
+    const paths = displayedEntries
+      .filter((e) => activeTab.selectedTokens.has(e.token))
+      .map((e) =>
+        activeTab.path
+          ? `${activeTab.path.replace(/[\\/]+$/, "")}\\${e.display_name}`
+          : e.display_name
+      );
+    if (paths.length === 0) return;
+    try {
+      await client.clipboardWrite(paths, false);
+    } catch (err: any) {
+      console.error("Failed to copy:", err);
+    }
+  }
+
+  async function handleCut() {
+    if (activeTab.selectedTokens.size === 0) return;
+    const paths = displayedEntries
+      .filter((e) => activeTab.selectedTokens.has(e.token))
+      .map((e) =>
+        activeTab.path
+          ? `${activeTab.path.replace(/[\\/]+$/, "")}\\${e.display_name}`
+          : e.display_name
+      );
+    if (paths.length === 0) return;
+    try {
+      await client.clipboardWrite(paths, true);
+    } catch (err: any) {
+      console.error("Failed to cut:", err);
+    }
+  }
+
+  async function handlePaste() {
+    if (!activeTab.path) return;
+    try {
+      const clip = await client.clipboardRead();
+      if (!clip || clip.paths.length === 0) return;
+      if (clip.is_cut) {
+        await client.executeMove(clip.paths, activeTab.path);
+      } else {
+        await client.executeCopy(clip.paths, activeTab.path);
+      }
+      refresh();
+      refreshJobs();
+    } catch (err: any) {
+      refreshJobs();
+      alert(err?.user_message || "Paste operation failed");
+    }
+  }
+
   async function handleModalSubmit(e?: React.FormEvent) {
     if (e) e.preventDefault();
     if (!modal) return;
-    const trimmed = modal.value.trim();
-    if (!trimmed) {
-      setModal({ ...modal, error: "Name cannot be empty" });
-      return;
-    }
 
     try {
-      if (modal.type === "create_folder") {
-        await client.createFolder(modal.folderToken, trimmed);
-      } else if (modal.type === "rename" && modal.itemToken) {
-        await client.renameItem(modal.folderToken, modal.itemToken, trimmed);
+      if (modal.type === "recycle") {
+        if (modal.targetPaths && modal.targetPaths.length > 0) {
+          await client.executeRecycle(modal.targetPaths);
+        }
+      } else {
+        const trimmed = modal.value.trim();
+        if (!trimmed) {
+          setModal({ ...modal, error: "Name cannot be empty" });
+          return;
+        }
+        if (modal.type === "create_folder") {
+          await client.createFolder(modal.folderToken, trimmed);
+        } else if (modal.type === "rename" && modal.itemToken) {
+          await client.renameItem(modal.folderToken, modal.itemToken, trimmed);
+        }
       }
       setModal(null);
       refresh();
@@ -812,6 +901,34 @@ export default function App() {
       // Keys that must NOT trigger table navigation while typing in inputs
       if (isInputActive) return;
 
+      // Ctrl+C -> Copy
+      if (e.ctrlKey && (e.key === "c" || e.key === "C")) {
+        e.preventDefault();
+        handleCopy();
+        return;
+      }
+
+      // Ctrl+X -> Cut
+      if (e.ctrlKey && (e.key === "x" || e.key === "X")) {
+        e.preventDefault();
+        handleCut();
+        return;
+      }
+
+      // Ctrl+V -> Paste
+      if (e.ctrlKey && (e.key === "v" || e.key === "V")) {
+        e.preventDefault();
+        handlePaste();
+        return;
+      }
+
+      // Delete -> Recycle selected items
+      if (e.key === "Delete") {
+        e.preventDefault();
+        openRecycleModal();
+        return;
+      }
+
       // Ctrl+A -> Select all
       if (e.ctrlKey && (e.key === "a" || e.key === "A")) {
         e.preventDefault();
@@ -942,6 +1059,49 @@ export default function App() {
           >
             <span>📁+</span>
             <span>New Folder</span>
+          </button>
+
+          <button
+            className="action-btn"
+            onClick={handleCopy}
+            disabled={activeTab.selectedTokens.size === 0}
+            title="Copy (Ctrl+C)"
+            aria-label="Copy"
+          >
+            <span>📋</span>
+            <span>Copy</span>
+          </button>
+
+          <button
+            className="action-btn"
+            onClick={handleCut}
+            disabled={activeTab.selectedTokens.size === 0}
+            title="Cut (Ctrl+X)"
+            aria-label="Cut"
+          >
+            <span>✂️</span>
+            <span>Cut</span>
+          </button>
+
+          <button
+            className="action-btn"
+            onClick={handlePaste}
+            title="Paste (Ctrl+V)"
+            aria-label="Paste"
+          >
+            <span>📥</span>
+            <span>Paste</span>
+          </button>
+
+          <button
+            className="action-btn"
+            onClick={() => openRecycleModal()}
+            disabled={activeTab.selectedTokens.size === 0}
+            title="Recycle (Delete)"
+            aria-label="Delete"
+          >
+            <span>🗑️</span>
+            <span>Delete</span>
           </button>
 
           <form
@@ -1212,12 +1372,42 @@ export default function App() {
               <div
                 className="context-menu-item"
                 onClick={() => {
+                  setContextMenu(null);
+                  handleCopy();
+                }}
+              >
+                <span>Copy</span>
+                <span className="context-menu-shortcut">Ctrl+C</span>
+              </div>
+              <div
+                className="context-menu-item"
+                onClick={() => {
+                  setContextMenu(null);
+                  handleCut();
+                }}
+              >
+                <span>Cut</span>
+                <span className="context-menu-shortcut">Ctrl+X</span>
+              </div>
+              <div
+                className="context-menu-item"
+                onClick={() => {
                   const entry = contextMenu.entry!;
                   openRenameModal(entry);
                 }}
               >
                 <span>Rename</span>
                 <span className="context-menu-shortcut">F2</span>
+              </div>
+              <div
+                className="context-menu-item"
+                onClick={() => {
+                  const entry = contextMenu.entry!;
+                  openRecycleModal(entry);
+                }}
+              >
+                <span>Delete</span>
+                <span className="context-menu-shortcut">Del</span>
               </div>
               <div
                 className="context-menu-item"
@@ -1272,6 +1462,16 @@ export default function App() {
                 className="context-menu-item"
                 onClick={() => {
                   setContextMenu(null);
+                  handlePaste();
+                }}
+              >
+                <span>Paste</span>
+                <span className="context-menu-shortcut">Ctrl+V</span>
+              </div>
+              <div
+                className="context-menu-item"
+                onClick={() => {
+                  setContextMenu(null);
                   refresh();
                 }}
               >
@@ -1312,23 +1512,38 @@ export default function App() {
         </div>
       )}
 
-      {/* Modal Dialog (New Folder / Rename) */}
+      {/* Modal Dialog (New Folder / Rename / Recycle) */}
       {modal && (
         <div className="modal-overlay" onClick={() => setModal(null)}>
           <div className="modal-container" onClick={(e) => e.stopPropagation()}>
             <div className="modal-header">{modal.title}</div>
             <form onSubmit={handleModalSubmit}>
               <div className="modal-body">
-                <input
-                  ref={modalInputRef}
-                  type="text"
-                  className="modal-input"
-                  value={modal.value}
-                  onChange={(e) => setModal({ ...modal, value: e.target.value, error: null })}
-                  placeholder="Enter name..."
-                />
+                {modal.type === "recycle" ? (
+                  <div style={{ fontSize: "14px", lineHeight: "1.5" }}>
+                    Are you sure you want to send{" "}
+                    <strong>
+                      {modal.targetPaths?.length === 1
+                        ? `"${modal.value}"`
+                        : `${modal.targetPaths?.length} items`}
+                    </strong>{" "}
+                    to the Recycle Bin?
+                    <div style={{ marginTop: "8px", fontSize: "12px", color: "var(--text-muted)" }}>
+                      Permanent deletion fallback is disabled for safety.
+                    </div>
+                  </div>
+                ) : (
+                  <input
+                    ref={modalInputRef}
+                    type="text"
+                    className="modal-input"
+                    value={modal.value}
+                    onChange={(e) => setModal({ ...modal, value: e.target.value, error: null })}
+                    placeholder="Enter name..."
+                  />
+                )}
                 {modal.error && (
-                  <div style={{ color: "var(--error-text)", fontSize: "12px" }}>
+                  <div style={{ color: "var(--error-text)", fontSize: "12px", marginTop: "8px" }}>
                     ⚠️ {modal.error}
                   </div>
                 )}
@@ -1341,8 +1556,11 @@ export default function App() {
                 >
                   Cancel
                 </button>
-                <button type="submit" className="modal-btn modal-btn-primary">
-                  {modal.type === "create_folder" ? "Create" : "Rename"}
+                <button
+                  type="submit"
+                  className={`modal-btn ${modal.type === "recycle" ? "modal-btn-danger" : "modal-btn-primary"}`}
+                >
+                  {modal.type === "create_folder" ? "Create" : modal.type === "rename" ? "Rename" : "Recycle"}
                 </button>
               </div>
             </form>

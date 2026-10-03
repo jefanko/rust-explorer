@@ -103,4 +103,51 @@
   - Job Drawer: Slide-out drawer displaying recent operations, state badges (`Completed`, `Failed`, `Canceled`, `Running`), timestamps, and error details.
   - Verification: `.\scripts\check.ps1` passed 100% (format, clippy, unit tests, TypeScript, build:ui, doctor), and standalone `rust-explorer.exe` built.
 
-**Next Milestone**: Milestone M4 — Everyday File Operations (Copy & Move via `IFileOperation`, guarded Recycle Bin deletion, and Windows Explorer `CF_HDROP` clipboard interoperability).
+## Milestone M4 — Everyday File Operations [COMPLETE]
+
+### Step 1: Shell Progress Sink & Guarded Recycle Bin Deletion
+- Implemented `crates/explorer-win/src/sink.rs`:
+  - `ShellProgressSink`: Implements COM interface `IFileOperationProgressSink` via `windows_core::implement`.
+  - In `PreDeleteItem`, inspects deletion transfer flags (`TSF_DELETE_RECYCLE_IF_POSSIBLE = 0x00000080`). If the target volume/storage does not support recycling or if the flag is missing, it immediately aborts the operation (`E_ABORT`) and sets `aborted_for_safety = true`. Strictly enforces the contract rule: *"Never silently fall back from Recycle to permanent deletion."*
+  - `SinkTracker`: Thread-safe tracking of per-item lifecycle (`PreCopyItem`, `PostCopyItem`, `PreMoveItem`, `PostMoveItem`, `PreDeleteItem`, `PostDeleteItem`, `ResetTimerOrAbort`), recording item outcomes (completed, failed, canceled).
+- Implemented `crates/explorer-win/src/shell.rs`:
+  - `shell_copy_items`: Copies multiple source paths to a destination folder using `IFileOperation::CopyItem` in `StaWorker`.
+  - `shell_move_items`: Moves multiple source paths to a destination folder using `IFileOperation::MoveItem` in `StaWorker`.
+  - `shell_recycle_items`: Safely deletes items to the Recycle Bin using `IFileOperation::DeleteItem` with `FOFX_RECYCLEONDELETE | FOFX_EARLYFAILURE` and `ShellProgressSink`. Preemptively rejects drive roots and UNC paths (`\\server\share`).
+  - Unit test `test_shell_copy_move_and_recycle_in_sta`: Validates copy, move, and recycle pipeline inside a temporary test fixture directory.
+
+### Step 2: Windows Explorer Clipboard Interoperability (CF_HDROP)
+- Implemented `crates/explorer-win/src/clipboard.rs`:
+  - `write_clipboard_hdrop`: Writes file paths using standard `CF_HDROP` (`DROPFILES` struct with wide characters) and registered clipboard format `Preferred DropEffect` (`DROPEFFECT_COPY = 1` for Copy, `DROPEFFECT_MOVE = 2` for Cut). Transfers handle ownership safely to Windows.
+  - `read_clipboard_hdrop`: Reads `CF_HDROP` file list and checks `Preferred DropEffect` to detect whether items were cut or copied. Enables seamless two-way interoperability with Windows File Explorer.
+  - Unit test `test_clipboard_roundtrip`: Verifies clipboard writing and reading for both copy and move modes.
+
+### Step 3: Job Planner & Executor Pipelines
+- Implemented `crates/explorer-jobs/src/planner.rs`:
+  - `plan_copy`: Validates source existence, checks maximum 10,000 items, deduplicates sources, ensures destination is a directory, and checks for source-inside-destination cycles.
+  - `plan_move`: Same validations as copy, plus verifies destination is not inside source (preventing moving a directory into its own child).
+  - `plan_recycle`: Validates source existence, rejects drive roots, rejects UNC paths (`ErrorCode::RecycleUnsupported`), and deduplicates items.
+- Extended `crates/explorer-jobs/src/executor.rs`:
+  - Dispatches `Copy`, `Move`, and `Recycle` operations through `StaWorker`.
+  - Records job state transitions (`Running`, `Completed`, `Failed`, `Canceled`) and item outcome counts in `JobJournal`.
+  - Unit tests `test_plan_copy_move_and_recycle` and `test_executor_copy_move_and_recycle_pipeline` pass 100%.
+- Extended `crates/explorer-jobs/src/queue.rs`:
+  - Added `plan_copy`, `plan_move`, `plan_recycle`, `execute_copy`, `execute_move`, `execute_recycle` methods to `OperationService`.
+
+### Step 4: Tauri IPC & Desktop UI Actions
+- Implemented Tauri IPC commands in `apps/desktop/src-tauri/src/commands.rs`:
+  - `plan_copy`, `plan_move`, `plan_recycle`, `execute_copy`, `execute_move`, `execute_recycle`, `clipboard_write`, `clipboard_read`.
+- Extended `apps/desktop/ui`:
+  - `bridge/client.ts` & `bridge/types.ts`: TypeScript wrappers and DTOs for clipboard and file operations.
+  - Toolbar Action Buttons: Copy, Cut, Paste, Delete buttons with dynamic enable/disable states based on current selection and clipboard content.
+  - Context Menu Actions: Copy, Cut, Delete on selected items; Paste on folder background.
+  - Keyboard Shortcuts: <kbd>Ctrl+C</kbd> (copy), <kbd>Ctrl+X</kbd> (cut), <kbd>Ctrl+V</kbd> (paste), <kbd>Delete</kbd> (recycle modal).
+  - Guarded Recycle Modal: Prompts user before deletion, showing item count, item names, and explicit notice that items are sent to the Recycle Bin.
+  - Automatic View Refresh: Automatically refreshes active folder snapshot after operation commits to immediately display file changes.
+
+### Step 5: Verification & Packaging
+- Fast verification suite `.\scripts\check.ps1` passed 100% (format, clippy with `-D warnings`, 19 Rust workspace tests, TypeScript strict typecheck, Vitest unit tests, UI build, and doctor).
+- Built debug desktop binary `target\debug\rust-explorer.exe` via `npx tauri build --debug --no-bundle`.
+
+**Next Milestone**: Milestone M5 — Live Changes (`notify` backend integration for visible folders and indexed roots, event batching, debounce, dirty-root tracking, and directory snapshot reconciliation).
+

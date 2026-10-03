@@ -1,12 +1,12 @@
 //! Operation queue and high-level service
 
 use crate::executor::JobExecutor;
-use crate::planner::{plan_create_folder, plan_rename};
+use crate::planner::{plan_copy, plan_create_folder, plan_move, plan_recycle, plan_rename};
 use explorer_domain::errors::ExplorerError;
 use explorer_domain::operations::{JobSummary, OperationPlan};
 use explorer_store::JobJournal;
 use explorer_win::com::StaWorker;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 pub struct OperationService {
@@ -36,6 +36,26 @@ impl OperationService {
         plan_rename(source, new_name)
     }
 
+    pub fn plan_copy(
+        &self,
+        sources: &[PathBuf],
+        destination: &Path,
+    ) -> Result<OperationPlan, ExplorerError> {
+        plan_copy(sources, destination)
+    }
+
+    pub fn plan_move(
+        &self,
+        sources: &[PathBuf],
+        destination: &Path,
+    ) -> Result<OperationPlan, ExplorerError> {
+        plan_move(sources, destination)
+    }
+
+    pub fn plan_recycle(&self, sources: &[PathBuf]) -> Result<OperationPlan, ExplorerError> {
+        plan_recycle(sources)
+    }
+
     pub fn commit_plan(&self, plan: &OperationPlan) -> Result<JobSummary, ExplorerError> {
         self.executor.execute_plan(plan)
     }
@@ -55,6 +75,29 @@ impl OperationService {
         new_name: &str,
     ) -> Result<JobSummary, ExplorerError> {
         let plan = self.plan_rename(source, new_name)?;
+        self.commit_plan(&plan)
+    }
+
+    pub fn execute_copy(
+        &self,
+        sources: &[PathBuf],
+        destination: &Path,
+    ) -> Result<JobSummary, ExplorerError> {
+        let plan = self.plan_copy(sources, destination)?;
+        self.commit_plan(&plan)
+    }
+
+    pub fn execute_move(
+        &self,
+        sources: &[PathBuf],
+        destination: &Path,
+    ) -> Result<JobSummary, ExplorerError> {
+        let plan = self.plan_move(sources, destination)?;
+        self.commit_plan(&plan)
+    }
+
+    pub fn execute_recycle(&self, sources: &[PathBuf]) -> Result<JobSummary, ExplorerError> {
+        let plan = self.plan_recycle(sources)?;
         self.commit_plan(&plan)
     }
 

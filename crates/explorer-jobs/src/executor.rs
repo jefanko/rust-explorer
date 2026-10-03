@@ -5,7 +5,9 @@ use explorer_domain::ids::{CommitToken, JobId};
 use explorer_domain::operations::{JobState, JobSummary, OperationKind, OperationPlan};
 use explorer_store::JobJournal;
 use explorer_win::com::StaWorker;
-use explorer_win::shell::{shell_create_folder, shell_rename_item};
+use explorer_win::shell::{
+    shell_copy_items, shell_create_folder, shell_move_items, shell_recycle_items, shell_rename_item,
+};
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -75,7 +77,7 @@ impl JobExecutor {
         self.journal.record_job(&summary)?;
 
         // Execute via dedicated STA worker thread
-        let result = match plan.kind {
+        let result: Result<usize, ExplorerError> = match plan.kind {
             OperationKind::CreateFolder => {
                 let parent = plan.destination_path.clone().ok_or_else(|| {
                     ExplorerError::new(
@@ -94,6 +96,7 @@ impl JobExecutor {
 
                 self.sta_worker
                     .execute(move || shell_create_folder(&parent, &name))
+                    .map(|_| 1)
             }
             OperationKind::Rename => {
                 let source = plan.source_paths.first().cloned().ok_or_else(|| {
@@ -113,12 +116,40 @@ impl JobExecutor {
 
                 self.sta_worker
                     .execute(move || shell_rename_item(&source, &new_name))
+                    .map(|_| 1)
             }
-            _ => Err(ExplorerError::new(
-                ErrorCode::UnsupportedPath,
-                format!("Operation kind {:?} not yet implemented in M3", plan.kind),
-                "execute_plan",
-            )),
+            OperationKind::Copy => {
+                let sources = plan.source_paths.clone();
+                let dest = plan.destination_path.clone().ok_or_else(|| {
+                    ExplorerError::new(
+                        ErrorCode::Internal,
+                        "Missing destination path for Copy",
+                        "execute_plan",
+                    )
+                })?;
+                self.sta_worker
+                    .execute(move || shell_copy_items(&sources, &dest))
+                    .map(|r| r.completed)
+            }
+            OperationKind::Move => {
+                let sources = plan.source_paths.clone();
+                let dest = plan.destination_path.clone().ok_or_else(|| {
+                    ExplorerError::new(
+                        ErrorCode::Internal,
+                        "Missing destination path for Move",
+                        "execute_plan",
+                    )
+                })?;
+                self.sta_worker
+                    .execute(move || shell_move_items(&sources, &dest))
+                    .map(|r| r.completed)
+            }
+            OperationKind::Recycle => {
+                let sources = plan.source_paths.clone();
+                self.sta_worker
+                    .execute(move || shell_recycle_items(&sources))
+                    .map(|r| r.completed)
+            }
         };
 
         let finish_epoch = SystemTime::now()
@@ -128,9 +159,9 @@ impl JobExecutor {
         summary.updated_at_epoch = finish_epoch;
 
         match result {
-            Ok(_) => {
+            Ok(completed) => {
                 summary.state = JobState::Succeeded;
-                summary.completed_items = plan.items_count;
+                summary.completed_items = completed;
             }
             Err(e) => {
                 if e.code == ErrorCode::Canceled {
@@ -199,5 +230,51 @@ mod tests {
         // 4. Verify journal recorded these jobs
         let recent = executor.list_recent_jobs(5).expect("list");
         assert_eq!(recent.len(), 2);
+    }
+
+    #[test]
+    fn test_executor_copy_move_and_recycle_pipeline() {
+        use crate::planner::{plan_copy, plan_move, plan_recycle};
+
+        let sta = Arc::new(StaWorker::new("test-exec-m4").expect("sta"));
+        let journal = Arc::new(JobJournal::open_in_memory().expect("journal"));
+        let executor = JobExecutor::new(sta, journal);
+
+        let dir = tempdir().expect("tempdir");
+        let parent = dir.path();
+        let src_dir = parent.join("src");
+        let dst_dir = parent.join("dst");
+        std::fs::create_dir(&src_dir).unwrap();
+        std::fs::create_dir(&dst_dir).unwrap();
+
+        let file = src_dir.join("work.txt");
+        std::fs::write(&file, "test data").unwrap();
+
+        // 1. Copy
+        let copy_plan = plan_copy(std::slice::from_ref(&file), &dst_dir).expect("plan copy");
+        let copy_summary = executor.execute_plan(&copy_plan).expect("execute copy");
+        assert_eq!(copy_summary.state, JobState::Succeeded);
+        assert_eq!(copy_summary.completed_items, 1);
+        assert!(dst_dir.join("work.txt").exists());
+
+        // 2. Move (from dst_dir to src_dir as work2.txt)
+        let copied = dst_dir.join("work.txt");
+        // Rename copied first so we can move it
+        let plan_ren = plan_rename(&copied, "work2.txt").unwrap();
+        executor.execute_plan(&plan_ren).unwrap();
+        let renamed = dst_dir.join("work2.txt");
+
+        let move_plan = plan_move(std::slice::from_ref(&renamed), &src_dir).expect("plan move");
+        let move_summary = executor.execute_plan(&move_plan).expect("execute move");
+        assert_eq!(move_summary.state, JobState::Succeeded);
+        assert!(!renamed.exists());
+        assert!(src_dir.join("work2.txt").exists());
+
+        // 3. Recycle
+        let recycle_target = src_dir.join("work2.txt");
+        let rec_plan = plan_recycle(std::slice::from_ref(&recycle_target)).expect("plan recycle");
+        let rec_summary = executor.execute_plan(&rec_plan).expect("execute recycle");
+        assert_eq!(rec_summary.state, JobState::Succeeded);
+        assert!(!recycle_target.exists());
     }
 }

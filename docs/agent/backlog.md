@@ -28,11 +28,11 @@
 - [x] **M3.3 Create Folder & Rename Slice**: Implement create-folder and rename via Shell backend with pre/post callbacks.
 - [x] **M3.4 Job Drawer UI**: Drawer showing progress, outcomes, and failure states.
 
-## Milestone M4 — Everyday File Operations
-- [ ] **M4.1 Copy & Move via Shell**: Execute copy/move jobs with conflict resolution via native dialogs.
-- [ ] **M4.2 Guarded Recycle**: Recycle bin deletion with `FOFX_RECYCLEONDELETE` and `PreDeleteItem` checks (no silent fallback).
-- [ ] **M4.3 Cancellation & Partial Outcomes**: Cooperative cancellation, item-level outcome recording, retry planning.
-- [ ] **M4.4 Explorer Clipboard Interoperability**: `CF_HDROP` copy/cut/paste interoperable with Windows Explorer.
+## Milestone M4 — Everyday File Operations [COMPLETE]
+- [x] **M4.1 Copy & Move via Shell**: Execute copy/move jobs with conflict resolution via native dialogs.
+- [x] **M4.2 Guarded Recycle**: Recycle bin deletion with `FOFX_RECYCLEONDELETE` and `PreDeleteItem` checks (no silent fallback).
+- [x] **M4.3 Cancellation & Partial Outcomes**: Cooperative cancellation, item-level outcome recording, retry planning.
+- [x] **M4.4 Explorer Clipboard Interoperability**: `CF_HDROP` copy/cut/paste interoperable with Windows Explorer.
 
 ## Milestone M5 — Live Changes
 - [ ] **M5.1 Directory Watching**: `notify` backend integration for visible folders and indexed roots.

@@ -25,9 +25,17 @@ pub fn run() {
             commands::remove_favorite,
             commands::plan_create_folder,
             commands::plan_rename,
+            commands::plan_copy,
+            commands::plan_move,
+            commands::plan_recycle,
             commands::commit_plan,
             commands::create_folder,
             commands::rename_item,
+            commands::execute_copy,
+            commands::execute_move,
+            commands::execute_recycle,
+            commands::clipboard_write,
+            commands::clipboard_read,
             commands::list_jobs
         ])
         .run(tauri::generate_context!())

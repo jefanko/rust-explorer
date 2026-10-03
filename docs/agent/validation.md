@@ -75,3 +75,22 @@ Every entry records: Date (UTC/Local), Milestone, Command executed, Build/Commit
 | 2026-10-03 | M3.4 | `.\scripts\check.ps1` | PASS | Full verification suite passes 100%. |
 | 2026-10-03 | M3.4 | `npx tauri build --debug --no-bundle` | PASS | Successfully compiled debug executable `target\debug\rust-explorer.exe` (includes Job Drawer, Folder creation modal, and Rename modal). |
 
+---
+
+### M4 Validation Log
+
+| Date | Step | Command | Result | Evidence / Output |
+|---|---|---|---|---|
+| 2026-10-03 | M4.1 | `cargo test --package explorer-win` | PASS | `test_shell_copy_move_and_recycle_in_sta`: Verified `IFileOperation` copy, move, and recycle in dedicated `StaWorker`. |
+| 2026-10-03 | M4.2 | `cargo test --package explorer-win` | PASS | `ShellProgressSink` verified: checks `TSF_DELETE_RECYCLE_IF_POSSIBLE` and aborts if recycling is not supported to prevent silent permanent deletion. |
+| 2026-10-03 | M4.3 | `cargo test --package explorer-jobs` | PASS | `test_plan_copy_move_and_recycle` & `test_executor_copy_move_and_recycle_pipeline`: Verified cycle prevention, UNC path rejection for recycling, and state logging in SQLite `JobJournal`. |
+| 2026-10-03 | M4.4 | `cargo test --package explorer-win` | PASS | `test_clipboard_roundtrip`: Verified Windows Explorer interoperability with `CF_HDROP` and `Preferred DropEffect` for copy (`1`) and move (`2`). |
+| 2026-10-03 | M4.4 | `cargo clippy --workspace --all-targets -- -D warnings` | PASS | Zero warnings across all workspace targets with `-D warnings`. |
+| 2026-10-03 | M4.4 | `cargo fmt --all -- --check` | PASS | Rust code formatting verified cleanly. |
+| 2026-10-03 | M4.4 | `cargo test --workspace` | PASS | All 19 unit and integration tests across 7 crates pass 100%. |
+| 2026-10-03 | M4.4 | `npm run typecheck` & `npm run test:unit` | PASS | TypeScript strict type checking passed, Vitest unit tests passed (3 tests). |
+| 2026-10-03 | M4.4 | `npm run build:ui` | PASS | Vite production build compiled (`dist/index.html`, CSS, JS bundles). |
+| 2026-10-03 | M4.4 | `cargo xtask doctor` | PASS | Toolchain check and SQLite FTS5 trigram virtual table check passed. |
+| 2026-10-03 | M4.4 | `.\scripts\check.ps1` | PASS | Complete CI fast verification suite passed 100%. |
+| 2026-10-03 | M4.4 | `npx tauri build --debug --no-bundle` | PASS | Standalone executable `target\debug\rust-explorer.exe` compiled cleanly with copy, move, recycle modal, and clipboard features. |
+

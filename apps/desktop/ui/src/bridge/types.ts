@@ -101,3 +101,9 @@ export interface JobSummary {
   created_at_epoch: number;
   updated_at_epoch: number;
 }
+
+export interface ClipboardPayload {
+  paths: string[];
+  is_cut: boolean;
+}
+

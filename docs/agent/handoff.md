@@ -34,18 +34,24 @@
   - Interactive Job Drawer UI with operation history, badges, and modals.
   - All tests and verification checks passing (`.\scripts\check.ps1`).
 
+- **Milestone M4 — Everyday File Operations**: 100% COMPLETE.
+  - Native Shell Copy & Move operations via `IFileOperation` on `StaWorker`.
+  - Guarded Recycle Bin deletion via `ShellProgressSink` with `TSF_DELETE_RECYCLE_IF_POSSIBLE` validation (aborts if recycling is not supported; no silent fallback).
+  - Windows Explorer clipboard interoperability via standard `CF_HDROP` and `Preferred DropEffect` (two-way copy/cut/paste).
+  - Operation planner with cycle/nesting detection, item count bounds, and UNC recycle prevention.
+  - UI toolbar buttons, context menu items, keyboard shortcuts (<kbd>Ctrl+C</kbd>, <kbd>Ctrl+X</kbd>, <kbd>Ctrl+V</kbd>, <kbd>Delete</kbd>), and guarded Recycle confirmation modal.
+  - Fast verification suite passed (`.\scripts\check.ps1`, 19 tests, 0 warnings) and standalone executable compiled.
+
 ## Current Milestone
-- **Milestone**: M4 — Everyday File Operations
+- **Milestone**: M5 — Live Changes
 - **Active Tickets**:
-  - `M4.1 Copy & Move via Shell`: Execute copy/move jobs with conflict resolution via native Shell backend.
-  - `M4.2 Guarded Recycle`: Recycle Bin deletion with `FOFX_RECYCLEONDELETE` and `PreDeleteItem` checks (no silent fallback).
-  - `M4.3 Cancellation & Partial Outcomes`: Cooperative cancellation, item-level outcome recording, retry planning.
-  - `M4.4 Explorer Clipboard Interoperability`: `CF_HDROP` copy/cut/paste interoperable with Windows Explorer.
+  - `M5.1 Directory Watching`: `notify` backend integration for active tab folder watching and indexed roots.
+  - `M5.2 Coalescing & Reconciliation`: Event batching, debounce, dirty-root tracking, and folder snapshot reconciliation.
 
 ## Next Commands
-1. Implement Shell copy and move operations in `crates/explorer-win/src/shell.rs` via `IFileOperation::CopyItem` and `IFileOperation::MoveItem`.
-2. Implement guarded Recycle Bin deletion via `IFileOperation::DeleteItem` with `FOFX_RECYCLEONDELETE` and capability checks.
-3. Extend planner and executor in `crates/explorer-jobs` for copy, move, and recycle.
-4. Implement Windows clipboard format reading/writing (`CF_HDROP` / `Preferred DropEffect`) for seamless copy/cut/paste with Windows Explorer.
-5. Add copy/cut/paste/delete actions to UI context menus, keyboard shortcuts (<kbd>Ctrl+C</kbd>, <kbd>Ctrl+X</kbd>, <kbd>Ctrl+V</kbd>, <kbd>Delete</kbd>), and verify with `.\scripts\check.ps1`.
+1. Review `crates/explorer-watch` structure and dependencies (integrate `notify` crate with recommended Windows ReadDirectoryChangesW backend).
+2. Implement watch subscription service managing active directory watches per tab.
+3. Implement coalescing and debounce logic to avoid event flooding during bulk filesystem operations.
+4. Wire watch events into `FolderService` / active snapshot refresh and emit UI change signals.
+5. Verify with `.\scripts\check.ps1` and test live file change reflections.
 
