@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::ops::{Deref, DerefMut};
 use thiserror::Error;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -26,7 +27,7 @@ pub enum ErrorCode {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Error)]
 #[error("{user_message} (code: {code:?}, operation: {operation})")]
-pub struct ExplorerError {
+pub struct ExplorerErrorData {
     pub code: ErrorCode,
     pub user_message: String,
     pub operation: String,
@@ -37,13 +38,31 @@ pub struct ExplorerError {
     pub safe_details: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Error)]
+#[serde(transparent)]
+#[error("{0}")]
+pub struct ExplorerError(pub Box<ExplorerErrorData>);
+
+impl Deref for ExplorerError {
+    type Target = ExplorerErrorData;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl DerefMut for ExplorerError {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
 impl ExplorerError {
     pub fn new(
         code: ErrorCode,
         user_message: impl Into<String>,
         operation: impl Into<String>,
     ) -> Self {
-        Self {
+        Self(Box::new(ExplorerErrorData {
             code,
             user_message: user_message.into(),
             operation: operation.into(),
@@ -52,6 +71,6 @@ impl ExplorerError {
             native_code: None,
             correlation_id: uuid::Uuid::new_v4().to_string(),
             safe_details: None,
-        }
+        }))
     }
 }

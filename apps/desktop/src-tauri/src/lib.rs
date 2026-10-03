@@ -1,7 +1,7 @@
-#[tauri::command]
-fn ping() -> &'static str {
-    "pong"
-}
+pub mod commands;
+pub mod state;
+
+use state::AppState;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -10,7 +10,14 @@ pub fn run() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
-        .invoke_handler(tauri::generate_handler![ping])
+        .manage(AppState::new())
+        .invoke_handler(tauri::generate_handler![
+            commands::bootstrap,
+            commands::navigate,
+            commands::list_page,
+            commands::refresh,
+            commands::open_item
+        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

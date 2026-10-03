@@ -1,45 +1,36 @@
 # Rust Explorer Progress Log
 
 ## Milestone M0 — Environment, Scaffolding, and Baseline Desktop Host [COMPLETE]
+- Scaffolding, toolchain installation, and baseline desktop window setup complete.
 
-### Step 1: Initial Specification Audit and Repo Setup
-- **Implemented**: Read `RUST_WINDOWS_EXPLORER_AGENT_SPEC.md` specification version 1.0.
-- **Created**:
-  - `AGENTS.md` (autonomous agent execution contract per section 25.4)
-  - `docs/agent/backlog.md` (roadmap ticket breakdown)
-  - `docs/agent/progress.md` (this file)
-  - `docs/agent/validation.md` (validation test log)
-  - `docs/agent/handoff.md` (session resumption state)
-  - `docs/environment.md` (environment and toolchain resolution)
-  - `docs/adr/0001-scaffold-and-technology-baseline.md` (architectural decisions)
-  - `.cargo/config.toml` (xtask alias)
-  - `rust-toolchain.toml` (pinned 1.99.0 MSVC toolchain)
-  - Root `Cargo.toml` and root `package.json`
+## Milestone M1 — Safe Browsing [COMPLETE]
 
-### Step 2: Toolchains & Linkers
-- Installed Rustup and configured stable `1.99.0-x86_64-pc-windows-msvc` toolchain.
-- Installed Visual Studio Build Tools 2022 (`Microsoft.VisualStudio.Workload.VCTools`) with MSVC `link.exe` and Windows SDK.
-- Verified linking and execution of native Windows binaries.
+### Step 1: Lossless Paths & Native Win32 Enumeration
+- Enhanced `crates/explorer-domain`: added `DirectoryPage`, `KnownFolderItem`, `DriveItem`, `BootstrapData`, `NavigationResponse`, `SortColumn`, and `SortDirection`.
+- Optimized `ExplorerError` to wrap `Box<ExplorerErrorData>` with `#[serde(transparent)]`, keeping `Result<T, ExplorerError>` down to 8 bytes.
+- Implemented `explorer-win/src/path.rs`: lossless UTF-16 conversions, extended length prefix (`\\?\` / `\\?\UNC\`), and strict path security validation.
+- Implemented `explorer-win/src/enumerate.rs`: native `FindFirstFileExW` / `FindNextFileW` with `FIND_FIRST_EX_LARGE_FETCH` and `FindExInfoBasic`.
+- Implemented `explorer-win/src/known_folders.rs`: `SHGetKnownFolderPath` (Desktop, Documents, Downloads, Pictures, Music, Videos) and `GetLogicalDriveStringsW` / `GetDiskFreeSpaceExW`.
+- Implemented `explorer-win/src/shell.rs`: `open_file_with_association` using `ShellExecuteExW`.
 
-### Step 3: Workspace Architecture & Crates
-- Scaffolded all 7 core engine crates in `crates/`:
-  - `explorer-domain`: Core IDs, models, structured errors, operations state machine.
-  - `explorer-win`: Native Win32 / COM / Shell wrappers.
-  - `explorer-fs`: Directory listing snapshot logic, sorting, pagination, path policy.
-  - `explorer-jobs`: Job queue, planner, progress, and Shell STA executor.
-  - `explorer-index`: SQLite FTS5 trigram search database and crawl engine.
-  - `explorer-watch`: Filesystem watching and event coalescing.
-  - `explorer-store`: Persistent settings, favorites, and job journal.
-- Scaffolded `xtask` crate implementing `doctor` (checks Git, Node, npm, and probes bundled SQLite FTS5 trigram capability).
-- Scaffolded `apps/desktop` Tauri 2 application with React, TypeScript, and Vite.
-- Generated project icons in `apps/desktop/src-tauri/icons/`.
+### Step 2: Filesystem Snapshot Service & Natural Sorting
+- Implemented `explorer-fs/src/listing.rs`: natural sorting comparator (e.g. `file2` < `file10`) with folders placed first.
+- Implemented `explorer-fs/src/snapshots.rs`: `FolderSnapshot` caching raw enumerated entries, generation numbers, and token-to-path mappings.
+- Implemented `explorer-fs/src/lib.rs`: `FolderService` providing thread-safe `navigate`, `list_page`, and `resolve_item`.
 
-### Step 4: Verification Suite & Baseline Launch
-- `cargo xtask doctor` verified all toolchains and SQLite FTS5 trigram queries.
-- `cargo fmt --all -- --check` and `cargo clippy --workspace --all-targets -- -D warnings` passed with zero errors.
-- `cargo test --workspace` passed all unit/integration tests.
-- `npm run typecheck`, `npm run build:ui`, and `npm run test:unit` passed.
-- `cargo build --package rust-explorer` produced `target\debug\rust-explorer.exe`.
-- Smoke test launched `rust-explorer.exe`, verified native Win32 window HWND allocation, and exited cleanly.
+### Step 3: Tauri IPC & Frontend Virtualized UI
+- Implemented `apps/desktop/src-tauri/src/commands.rs`: `bootstrap`, `navigate`, `list_page`, `refresh`, `open_item`.
+- Created `apps/desktop/ui/src/bridge/`: typed TypeScript DTOs and `client.ts` invoke wrapper.
+- Implemented `apps/desktop/ui/src/app/App.tsx`:
+  - Connected to live Rust backend via `client.bootstrap()`.
+  - Sidebar showing live Windows Known Folders and Logical Drives.
+  - Virtualized table using `@tanstack/react-virtual` for fast rendering of large directory listings.
+  - Column sorting (Name, Type, Size, Date modified) with direction toggles.
+  - History stack (Back, Forward, Up to parent).
+  - Editable address bar with direct path submission.
+  - Instant in-folder filtering.
+  - Double-click folder navigation and file launching via native Windows association.
+- Verified with `.\scripts\check.ps1` (0 warnings, 0 errors, all tests passing).
+- Rebuilt desktop binary `rust-explorer.exe` with embedded assets and launched on desktop.
 
-**Next Milestone**: Milestone M1 — Safe Browsing (Folder enumeration, lossless paths, virtualized details table, navigation bar, and known folders/drives).
+**Next Milestone**: Milestone M2 — Tabs and Interaction (multi-tab state, keyboard shortcuts, favorites, persistent settings).

@@ -1,19 +1,19 @@
 # Rust Explorer Backlog
 
-## Milestone M0 — Environment, Scaffolding, and Baseline Desktop Host
+## Milestone M0 — Environment, Scaffolding, and Baseline Desktop Host [COMPLETE]
 - [x] **M0.1 Environment Audit & Toolchain Setup**: Verify/install Rust (`x86_64-pc-windows-msvc`), MSVC C++ Build Tools & Windows SDK, Node.js LTS, WebView2 runtime.
 - [x] **M0.2 Workspace Scaffolding**: Setup root `Cargo.toml`, `package.json`, `.cargo/config.toml`, `rust-toolchain.toml`, `crates/` layout, and `apps/desktop` Tauri 2 app.
 - [x] **M0.3 Xtask & Script Infrastructure**: Implement `xtask doctor` (toolchain, SQLite FTS5 trigram verification) and core build/lint/test scripts.
 - [x] **M0.4 Blank Window Launch & CI Baseline**: Verify compilation and launch of desktop Tauri 2 window on Windows 11. Record versions in `docs/environment.md`.
 
-## Milestone M1 — Safe Browsing
-- [ ] **M1.1 Lossless Path & Domain Models**: Implement `explorer-domain` types, lossless UTF-16 path conversions, opaque item tokens, structured errors.
-- [ ] **M1.2 Native Win32 Enumeration**: Implement `explorer-win` directory enumeration using wide APIs and owned handles.
-- [ ] **M1.3 Filesystem Service & Snapshots**: Implement `explorer-fs` listing snapshot, sorting, cancelable pagination, and bounded workers.
-- [ ] **M1.4 Tauri IPC Adapter**: Implement typed commands/events for navigation and listing (`navigate`, `list_page`, `refresh`).
-- [ ] **M1.5 Virtualized Details View**: React + `@tanstack/react-virtual` table rendering name, type, size, modified date with loading states.
-- [ ] **M1.6 Sidebar Known Folders & Drives**: Integrate `SHGetKnownFolderPath` and logical drive APIs into sidebar.
-- [ ] **M1.7 Navigation Address Bar & History**: Implement breadcrumbs, editable address bar, back/forward/up navigation.
+## Milestone M1 — Safe Browsing [COMPLETE]
+- [x] **M1.1 Lossless Path & Domain Models**: Implement `explorer-domain` types, lossless UTF-16 path conversions, opaque item tokens, structured errors.
+- [x] **M1.2 Native Win32 Enumeration**: Implement `explorer-win` directory enumeration using wide APIs (`FindFirstFileExW`/`FindNextFileW`) and owned handles.
+- [x] **M1.3 Filesystem Service & Snapshots**: Implement `explorer-fs` listing snapshot, natural sorting (directories first), cancelable pagination, and bounded workers.
+- [x] **M1.4 Tauri IPC Adapter**: Implement typed commands/events for navigation and listing (`bootstrap`, `navigate`, `list_page`, `refresh`, `open_item`).
+- [x] **M1.5 Virtualized Details View**: React + `@tanstack/react-virtual` table rendering name, type, size, modified date with loading and error states.
+- [x] **M1.6 Sidebar Known Folders & Drives**: Integrate `SHGetKnownFolderPath` (Documents, Downloads, Desktop, etc.) and `GetLogicalDriveStringsW` / `GetDiskFreeSpaceExW`.
+- [x] **M1.7 Navigation Address Bar & History**: Implement editable address bar, back/forward/up navigation with history stack, and instant folder filtering.
 
 ## Milestone M2 — Tabs and Interaction
 - [ ] **M2.1 Multi-Tab State**: Independent location, history, scroll, and selection per tab.

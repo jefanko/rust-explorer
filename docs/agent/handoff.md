@@ -13,24 +13,24 @@
 
 ## Completed Milestones
 - **Milestone M0 — Environment, Scaffolding, and Baseline Desktop Host**: 100% COMPLETE.
-  - All crates compiled and verified.
-  - `cargo xtask doctor` passes.
-  - `scripts/check.ps1` passes (fmt, clippy, test, typecheck, ui build, doctor).
-  - Desktop executable `target\debug\rust-explorer.exe` built and verified launching with Win32 HWND.
+- **Milestone M1 — Safe Browsing**: 100% COMPLETE.
+  - Native Win32 enumeration (`FindFirstFileExW` / `FindNextFileW`).
+  - Windows Known Folders (`SHGetKnownFolderPath`) and Logical Drives (`GetLogicalDriveStringsW`).
+  - Thread-safe `FolderService` with generation counter, snapshots, and natural sorting.
+  - Interactive React UI with `@tanstack/react-virtual` table, address bar, history navigation, and live Rust IPC.
+  - All tests and verification checks passing (`.\scripts\check.ps1`).
 
 ## Current Milestone
-- **Milestone**: M1 — Safe Browsing
+- **Milestone**: M2 — Tabs and Interaction
 - **Active Tickets**:
-  - `M1.1 Lossless Path & Domain Models`: Win32 lossless UTF-16 conversions, opaque item tokens, structured errors.
-  - `M1.2 Native Win32 Enumeration`: Wide-character directory enumeration in `explorer-win`.
-  - `M1.3 Filesystem Service & Snapshots`: Listing snapshot, sorting, pagination in `explorer-fs`.
-  - `M1.4 Tauri IPC Adapter`: Typed navigation and listing IPC (`navigate`, `list_page`, `refresh`).
-  - `M1.5 Virtualized Details View`: React + `@tanstack/react-virtual` table.
-  - `M1.6 Sidebar Known Folders & Drives`: `SHGetKnownFolderPath` and drive detection.
-  - `M1.7 Navigation Address Bar & History`: Breadcrumbs and editable address bar.
+  - `M2.1 Multi-Tab State`: Independent location, history, scroll, and selection per tab.
+  - `M2.2 Keyboard Navigation`: Full keyboard shortcuts (Enter, Arrows, Alt+Left/Right/Up, Ctrl+L, Ctrl+T, Ctrl+W, F5).
+  - `M2.3 Selection & Context Menu`: Multi-selection, stable row keys, app-owned context menu.
+  - `M2.4 Native Open & Properties`: `ShellExecuteExW` file association launch and native properties dialog.
+  - `M2.5 Persistent Preferences`: Settings store for theme, favorites, tab restoration, column widths.
 
 ## Next Commands
-1. Implement `explorer-win/src/enumerate.rs` using `FindFirstFileW` / `FindNextFileW` with wide APIs.
-2. Implement snapshot building, natural sorting, and pagination in `explorer-fs`.
-3. Wire Tauri commands in `src-tauri/src/commands.rs`.
+1. Implement multi-tab state management in React UI.
+2. Implement global keyboard shortcuts (Alt+Arrows, Ctrl+T, Ctrl+W, Ctrl+L, F5).
+3. Implement SQLite settings store in `explorer-store` for tab restoration and preferences.
 4. Run `.\scripts\check.ps1`.

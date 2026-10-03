@@ -24,3 +24,19 @@ Every entry records: Date (UTC/Local), Milestone, Command executed, Build/Commit
 | 2026-10-03 | M0.3 | `npm run test:unit` | PASS | Vitest suite executed cleanly. |
 | 2026-10-03 | M0.4 | `cargo build --package rust-explorer` | PASS | `target\debug\rust-explorer.exe` (18.2 MB) produced. |
 | 2026-10-03 | M0.4 | Desktop smoke launch | PASS | Launched process PID 40568, initialized valid Win32 HWND 3869342, closed cleanly. |
+
+---
+
+### M1 Validation Log
+
+| Date | Step | Command | Result | Evidence / Output |
+|---|---|---|---|---|
+| 2026-10-03 | M1.1 | `cargo test --package explorer-win` | PASS | Verified path conversions (`path_to_wide`, `wide_to_path`), extended prefixes (`\\?\`, `\\?\UNC\`), and path safety validation. |
+| 2026-10-03 | M1.2 | `cargo test --package explorer-win` | PASS | `enumerate_directory` verified against temporary directory fixture with mixed files, extensions, and subdirectories. |
+| 2026-10-03 | M1.2 | `cargo test --package explorer-win` | PASS | `get_standard_known_folders` and `get_logical_drives` verified against live Windows system (Documents, C: drive resolved). |
+| 2026-10-03 | M1.3 | `cargo test --package explorer-fs` | PASS | `FolderService` snapshot caching, pagination, and natural sorting (directories-first) verified. |
+| 2026-10-03 | M1.4 | `cargo check --package rust-explorer` | PASS | Registered Tauri commands (`bootstrap`, `navigate`, `list_page`, `refresh`, `open_item`). |
+| 2026-10-03 | M1.5 | `npm run typecheck`, `npm run build:ui`, `npm run test:unit` | PASS | Virtualized table (@tanstack/react-virtual), address bar, sidebar navigation compiled and passed tests. |
+| 2026-10-03 | M1.6 | `cargo clippy --workspace --all-targets -- -D warnings` | PASS | Clean clippy run across workspace. |
+| 2026-10-03 | M1.7 | `.\scripts\check.ps1` | PASS | Complete CI pipeline checks passed 100%. |
+| 2026-10-03 | M1.7 | Live Desktop Launch | PASS | Launched process PID 6512 with HWND 4459148. Real directories (Documents, Drives) enumerate and render interactively. |
