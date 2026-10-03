@@ -40,10 +40,30 @@ impl WatchService {
 
         let coalescer = EventCoalescer::new(watched_paths.clone(), notif_tx.clone());
 
-        // Spawn async coalescer task
-        tokio::spawn(async move {
-            coalescer.run_loop(raw_rx).await;
-        });
+        // Spawn async coalescer on a dedicated background thread with its own runtime
+        // so WatchService can be instantiated from any thread (with or without an ambient runtime).
+        std::thread::Builder::new()
+            .name("watch-coalescer".to_string())
+            .spawn(move || {
+                let rt = match tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                {
+                    Ok(rt) => rt,
+                    Err(e) => {
+                        tracing::error!("Failed to create tokio runtime for watch-coalescer: {e}");
+                        return;
+                    }
+                };
+                rt.block_on(coalescer.run_loop(raw_rx));
+            })
+            .map_err(|e| {
+                ExplorerError::new(
+                    ErrorCode::Internal,
+                    format!("Failed to spawn watch-coalescer thread: {e}"),
+                    "WatchService::new",
+                )
+            })?;
 
         Ok(Self {
             adapter: Mutex::new(Some(adapter)),
