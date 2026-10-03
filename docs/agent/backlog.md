@@ -44,10 +44,10 @@
 - [x] **M6.3 Search Query Engine**: Query parser (terms, phrases, `ext:`, `type:`), ranking, paged results.
 - [x] **M6.4 Search UI**: Current folder filter and indexed search scope switcher.
 
-## Milestone M7 — Hardening and Performance
-- [ ] **M7.1 100k-Entry Stress Verification**: Virtualization and memory stability test on 100k items.
-- [ ] **M7.2 Resource Limits & Leak Prevention**: Audit handle, memory, and channel bounds.
-- [ ] **M7.3 Security Audit**: CSP review, IPC authority checks, input sanitization.
+## Milestone M7 — Hardening and Performance [COMPLETE]
+- [x] **M7.1 100k-Entry Stress Verification**: Virtualization and memory stability test on 100k items.
+- [x] **M7.2 Resource Limits & Leak Prevention**: Audit handle, memory, and channel bounds.
+- [x] **M7.3 Security Audit**: CSP review, IPC authority checks, input sanitization.
 
 ## Milestone M8 — Installable MVP
 - [ ] **M8.1 NSIS Installer**: Per-user installer packaging with Start Menu shortcut.

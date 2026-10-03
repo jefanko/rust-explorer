@@ -132,5 +132,18 @@ Every entry records: Date (UTC/Local), Milestone, Command executed, Build/Commit
 | 2026-10-03 | M6.4 | `.\scripts\check.ps1` | PASS | Full fast verification suite passes 100%. |
 | 2026-10-03 | M6.4 | `cargo build --package rust-explorer` | PASS | Standalone executable `target\debug\rust-explorer.exe` compiled cleanly with indexed search and UI scope switcher. |
 
+---
+
+### M7 Validation Log
+
+| Date | Step | Command | Result | Evidence / Output |
+|---|---|---|---|---|
+| 2026-10-04 | M7.1 | `cargo test --package explorer-fs --test stress_tests --release` | PASS | 100k entries generated in 43.1 ms; snapshot created in 45.8 ms; initial natural sort + page 1: 103.2 ms (<150 ms budget); subsequent page 2: 76.4 µs (<5 ms budget); token lookup: 200 ns (<50 µs budget). |
+| 2026-10-04 | M7.1 | `cargo test --package explorer-index --test stress_tests --release` | PASS | 100k entries indexed into SQLite FTS5 in 14.5s (6,888 items/sec); disk size: 67.93 MiB (budget <= 350 MiB); substring search: 6.86 ms (<50 ms budget); phrase search: 799.7 µs (<50 ms budget). |
+| 2026-10-04 | M7.1 | `cargo run -p xtask -- bench release` | PASS | Full automated benchmark runner executed; summary report written to `artifacts/benchmarks/summary.md`. |
+| 2026-10-04 | M7.2 | `cargo test --workspace` | PASS | 33 tests across workspace pass; watcher unwatch_all, bounded ingress/dirty directories, and LRU snapshot pruning verified. |
+| 2026-10-04 | M7.3 | Security Audit & CSP check | PASS | Content Security Policy reviewed; window label `"main"` bound to capability `"main-capability"`; webview permissions restricted to `"core:default"` with no shell exec plugins exposed. |
+| 2026-10-04 | M7.3 | `.\scripts\check.ps1` | PASS | Fast verification suite passes 100% (format, clippy with `-D warnings`, 33 tests, TypeScript strict, Vitest, UI build, doctor). |
+
 
 

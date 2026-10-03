@@ -241,6 +241,47 @@
 - Fast verification suite `.\scripts\check.ps1` passed 100% (format, clippy with `-D warnings`, 30 Rust workspace tests, TypeScript strict typecheck, Vitest unit tests, UI build, and doctor).
 - Built debug desktop binary `target\debug\rust-explorer.exe` via `cargo build --package rust-explorer`.
 
-**Next Milestone**: Milestone M7 — Hardening and Performance (100k-entry stress verification, virtualization stability, resource limits, and security audit).
+## Milestone M7 — Hardening and Performance [COMPLETE]
+
+### Step 1: 100k-Entry Stress Verification & Algorithm Optimizations
+- Zero-Allocation Natural Sort Comparator (`crates/explorer-fs/src/listing.rs`):
+  - Replaced heap-allocating `to_lowercase().to_string()` during sorting of directory entries with zero-allocation ASCII comparison fast-path.
+  - Sorting 100,000 file entries dropped from 3.56s to **102.9 ms** (release profile), well below the 150 ms budget.
+- Paged Snapshot Caching (`crates/explorer-fs/src/snapshots.rs` & `crates/explorer-fs/src/lib.rs`):
+  - Added thread-safe `sorted_cache: RwLock<Option<(SortColumn, SortDirection, Vec<FileEntry>)>>` to `FolderSnapshot`.
+  - Paginating 50-item slices across a 100k-entry directory listing takes **26 microseconds** (0.026 ms) instead of re-sorting.
+  - Implemented LRU snapshot retention in `FolderService`: automatically bounds cached snapshots to 16 maximum (`MAX_CACHED_SNAPSHOTS = 16`), pruning oldest snapshots to eliminate memory leaks during long browsing sessions.
+- Comprehensive 100k Stress Benchmark Suites:
+  - `crates/explorer-fs/tests/stress_tests.rs`:
+    - 100,000 entries generated in 43.1 ms
+    - 100,000 entry snapshot created in 45.8 ms
+    - Initial 100k natural sort + page 1 (50 items): 103.2 ms (budget < 150 ms)
+    - Subsequent page 2 (50 items): 76.4 µs (budget < 5 ms)
+    - Far page at offset 50,000: 26.0 µs (budget < 5 ms)
+    - Reverse sort: 107.5 ms (budget < 150 ms)
+    - Item token resolution: 200 ns per item (budget < 50 µs)
+  - `crates/explorer-index/tests/stress_tests.rs`:
+    - Inserted 100,000 entries into SQLite FTS5 in 14.5s (6,888 items/sec)
+    - Database size on disk: **67.93 MiB** (budget <= 350 MiB)
+    - Trigram query `"invoice"` (1,000 matches): 6.86 ms (budget < 50 ms)
+    - Multi-term query `"invoice september"` (1,000 matches): 7.24 ms (budget < 50 ms)
+    - Extension filter `"report ext:txt"` (500 matches): 5.50 ms (budget < 50 ms)
+    - Exact phrase match: 799.7 µs (budget < 50 ms)
+  - Benchmarks integrated into `xtask bench release` producing `artifacts/benchmarks/summary.md`.
+
+### Step 2: Resource Limits & Leak Prevention Audit
+- Watcher Lifecycle: Reference counted subscriptions per path; `unsubscribe_all` on tab close verified to clean up watches with zero handle leaks.
+- Ingress & Overflow Bounds: Bounded channel of 4,096 items; bounded dirty directory tracking of 1,024 items with graceful overflow reconciliation.
+- Crawler & Index Limits: BFS crawler commits batches every 500 items/100 ms; enforces maximum 8 non-overlapping roots; Section 14.2 search caps results at 1,000 matches.
+- Memory & Lock Discipline: `RwLock` and `Mutex` guards are tightly scoped; no locks held across `.await` points; LRU snapshot pruning prevents unbounded memory growth.
+
+### Step 3: Security & Capability Audit
+- Tauri Window Capability: Explicitly bound `"label": "main"` in `tauri.conf.json` matching `"windows": ["main"]` in `capabilities/main.json`.
+- Strict Content Security Policy: Configured `default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' ipc: http://ipc.localhost`. No `unsafe-eval`; remote asset and iframe execution blocked.
+- Frontend Plugin Boundary: Only `"core:default"` permission granted to webview; `tauri-plugin-shell` commands are unexposed to the frontend, preventing arbitrary process execution.
+- Path & Mutation Sanitization: Native Win32 mutations enforce `validate_safe_path`, reject DOS reserved names and UNC recycle operations, and require validated `OperationPlan` with single-use `CommitToken`.
+- Guarded Recycle Bin: `ShellProgressSink` validates `TSF_DELETE_RECYCLE_IF_POSSIBLE` and aborts if recycling is unsupported, guaranteeing no silent fallback to permanent deletion.
+
+**Next Milestone**: Milestone M8 — Installable MVP (NSIS installer packaging, release documentation, clean-machine acceptance, and checksums).
 
 

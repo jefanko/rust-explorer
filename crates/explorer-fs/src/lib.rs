@@ -59,6 +59,22 @@ impl FolderService {
             let mut snaps = self.snapshots.write().map_err(|_| {
                 ExplorerError::new(ErrorCode::Internal, "Lock poisoned", "navigate")
             })?;
+
+            // LRU pruning: keep at most 16 snapshots
+            const MAX_CACHED_SNAPSHOTS: usize = 16;
+            if snaps.len() >= MAX_CACHED_SNAPSHOTS {
+                let oldest = snaps
+                    .iter()
+                    .min_by_key(|(_, s)| s.created_at)
+                    .map(|(t, _)| t.clone());
+                if let Some(oldest_token) = oldest {
+                    snaps.remove(&oldest_token);
+                    if let Ok(mut paths) = self.folder_paths.write() {
+                        paths.remove(&oldest_token);
+                    }
+                }
+            }
+
             snaps.insert(folder_token.clone(), snapshot);
         }
 
@@ -112,16 +128,8 @@ impl FolderService {
             ));
         }
 
-        let mut sorted_entries = snapshot.entries.clone();
-        listing::sort_entries(&mut sorted_entries, sort_column, sort_direction);
-
-        let total = sorted_entries.len();
+        let (paged_entries, total) = snapshot.get_page(offset, limit, sort_column, sort_direction);
         let end = (offset + limit).min(total);
-        let paged_entries = if offset < total {
-            sorted_entries[offset..end].to_vec()
-        } else {
-            Vec::new()
-        };
 
         Ok(DirectoryPage {
             folder_token: folder_token.clone(),

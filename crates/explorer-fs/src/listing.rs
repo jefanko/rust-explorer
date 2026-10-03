@@ -34,10 +34,14 @@ pub fn natural_cmp(a: &str, b: &str) -> Ordering {
                 other => return other,
             }
         } else {
-            // Case-insensitive character comparison
-            let ac_lower = ac.to_lowercase().to_string();
-            let bc_lower = bc.to_lowercase().to_string();
-            match ac_lower.cmp(&bc_lower) {
+            // Zero-allocation case-insensitive character comparison
+            let ord = if ac.is_ascii() && bc.is_ascii() {
+                ac.to_ascii_lowercase().cmp(&bc.to_ascii_lowercase())
+            } else {
+                ac.to_lowercase().cmp(bc.to_lowercase())
+            };
+
+            match ord {
                 Ordering::Equal => {
                     a_chars.next();
                     b_chars.next();
@@ -47,8 +51,12 @@ pub fn natural_cmp(a: &str, b: &str) -> Ordering {
         }
     }
 
-    // If one ended before the other
-    a.len().cmp(&b.len())
+    // If one ended before the other, shorter string comes first
+    match (a_chars.peek().is_some(), b_chars.peek().is_some()) {
+        (true, false) => Ordering::Greater,
+        (false, true) => Ordering::Less,
+        _ => Ordering::Equal,
+    }
 }
 
 /// Sorts file entries: directories first, then by chosen column, then natural name tie-breaker.

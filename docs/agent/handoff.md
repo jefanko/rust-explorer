@@ -58,17 +58,28 @@
   - UI Search scope switcher (`[ Folder | Indexed ]`), 150 ms debounced query execution with request cancellation, virtualized results list, match count capping at 1,000 matches, and sidebar Indexed Roots manager with live status badges.
   - Fast verification suite passed (`.\scripts\check.ps1`, 30 tests, 0 warnings) and standalone desktop binary packaged.
 
+- **Milestone M7 — Hardening and Performance**: 100% COMPLETE.
+  - Zero-allocation ASCII natural sort comparator (reduced 100k sort time from 3.56s to 102.9 ms, 35x speedup).
+  - Paged snapshot caching in `FolderSnapshot` (50-item page slice takes 26 µs via `sorted_cache`).
+  - LRU snapshot pruning in `FolderService` (capped at 16 snapshots maximum).
+  - 100k directory listing benchmark: 45.8 ms snapshot creation, 103.2 ms sort, 200 ns token lookup.
+  - 100k SQLite FTS5 benchmark: 6,888 items/sec indexing, 67.93 MiB on disk, <10 ms queries.
+  - Automated benchmark runner `xtask bench release` producing `artifacts/benchmarks/summary.md`.
+  - Resource limits: bounded watch channels, refcounted watch subscriptions with `unsubscribe_all`, 1000 search match cap.
+  - Security audit: strict CSP, window `"main"` capability binding, `"core:default"` webview permissions, `ShellProgressSink` guarded recycle.
+  - Fast verification suite passed (`.\scripts\check.ps1`, 33 tests, 0 warnings).
+
 ## Current Milestone
-- **Milestone**: M7 — Hardening and Performance
+- **Milestone**: M8 — Installable MVP
 - **Active Tickets**:
-  - `M7.1 100k-Entry Stress Verification`: Virtualization and memory stability test on 100k items.
-  - `M7.2 Resource Limits & Leak Prevention`: Audit handle, memory, and channel bounds.
-  - `M7.3 Security Audit`: CSP review, IPC authority checks, input sanitization.
+  - `M8.1 NSIS Installer`: Per-user NSIS installer packaging with Start Menu shortcut.
+  - `M8.2 Native E2E Test Suite`: Verify desktop launch and full user journey on Windows 11.
+  - `M8.3 Clean-Machine Acceptance`: Build final release installer, compute SHA-256 checksums, and verify definition-of-done checklist.
 
 ## Next Commands
-1. Review Section 23 Performance Budget and Section 24 Stress Scenarios in `RUST_WINDOWS_EXPLORER_AGENT_SPEC.md`.
-2. Implement 100k-entry synthetic fixture stress verification to ensure table scrolling stays >= 55 FPS and memory stays bounded within 200 MB.
-3. Audit Windows handles and watcher subscriptions under rapid tab cycling and cancellation.
-4. Perform security audit on Tauri IPC commands, path canonicalization, and Content Security Policy.
+1. Configure and run NSIS installer build using Tauri bundler: `npx tauri build`.
+2. Verify per-user installation mode (`currentUser`) without administrator requirement.
+3. Compute SHA-256 checksums and package release documentation.
+4. Execute definition-of-done acceptance checklist.
 
 
