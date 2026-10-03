@@ -56,3 +56,22 @@ Every entry records: Date (UTC/Local), Milestone, Command executed, Build/Commit
 | 2026-10-03 | M2.5 | `cargo xtask doctor` | PASS | All prerequisites (git, node, npm, SQLite FTS5 trigram virtual tables) passed. |
 | 2026-10-03 | M2.5 | `.\scripts\check.ps1` | PASS | Complete verification suite passed (format, clippy, tests, typecheck, unit tests, build, doctor). |
 | 2026-10-03 | M2.5 | `npx tauri build --debug --no-bundle` | PASS | Standalone executable `target\debug\rust-explorer.exe` produced with offline embedded assets. |
+
+---
+
+### M3 Validation Log
+
+| Date | Step | Command | Result | Evidence / Output |
+|---|---|---|---|---|
+| 2026-10-03 | M3.1 | `cargo test --package explorer-win` | PASS | `test_shell_create_folder_and_rename_in_sta`: Verified `StaWorker` execution of `shell_create_folder` and `shell_rename_item` via Win32 `IFileOperation`. |
+| 2026-10-03 | M3.2 | `cargo test --package explorer-store` | PASS | `test_job_journal_lifecycle_and_interrupted_recovery`: Verified `JobJournal` schema, job recording, state transitions, and interrupted recovery on startup. |
+| 2026-10-03 | M3.2 | `cargo test --package explorer-jobs` | PASS | `test_name_validation`, `test_plan_create_folder_and_rename`, and `test_executor_create_folder_and_rename_pipeline`: Verified DOS reserved names, immutable plans, single-use commit tokens, and execution pipeline. |
+| 2026-10-03 | M3.3 | `cargo check --package rust-explorer` | PASS | Tauri IPC commands compiled cleanly (`plan_create_folder`, `plan_rename`, `commit_plan`, `create_folder`, `rename_item`, `list_jobs`). |
+| 2026-10-03 | M3.4 | `npm run typecheck` | PASS | TypeScript strict type checking passed with 0 errors across new operation bridge types and client functions. |
+| 2026-10-03 | M3.4 | `npm run test:unit` | PASS | Vitest suite passed 100% (3 tests). |
+| 2026-10-03 | M3.4 | `cargo clippy --workspace --all-targets -- -D warnings` | PASS | Clippy verified with 0 warnings/errors across all crates and targets. |
+| 2026-10-03 | M3.4 | `cargo fmt --all -- --check` | PASS | Rust code formatting verified cleanly. |
+| 2026-10-03 | M3.4 | `cargo test --workspace` | PASS | All 17 unit and integration tests across the workspace pass. |
+| 2026-10-03 | M3.4 | `.\scripts\check.ps1` | PASS | Full verification suite passes 100%. |
+| 2026-10-03 | M3.4 | `npx tauri build --debug --no-bundle` | PASS | Successfully compiled debug executable `target\debug\rust-explorer.exe` (includes Job Drawer, Folder creation modal, and Rename modal). |
+

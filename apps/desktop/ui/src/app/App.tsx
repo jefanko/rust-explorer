@@ -4,6 +4,7 @@ import { client } from "../bridge/client";
 import {
   DriveItem,
   FileEntry,
+  JobSummary,
   KnownFolderItem,
   SortColumn,
   SortDirection,
@@ -82,6 +83,15 @@ interface ContextMenuState {
   entry?: FileEntry;
 }
 
+interface ModalState {
+  type: "create_folder" | "rename";
+  title: string;
+  value: string;
+  folderToken: string;
+  itemToken?: string;
+  error?: string | null;
+}
+
 function createInitialTab(id = "tab_1", initialPath = ""): TabState {
   return {
     id,
@@ -116,12 +126,18 @@ export default function App() {
   const [tabs, setTabs] = useState<TabState[]>([createInitialTab()]);
   const [activeTabIndex, setActiveTabIndex] = useState<number>(0);
 
-  // Context menu state
+  // Context menu & Modal state
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
+  const [modal, setModal] = useState<ModalState | null>(null);
+
+  // Jobs state
+  const [jobs, setJobs] = useState<JobSummary[]>([]);
+  const [showJobsDrawer, setShowJobsDrawer] = useState<boolean>(false);
 
   // Refs for element focus and callbacks
   const addressInputRef = useRef<HTMLInputElement>(null);
   const filterInputRef = useRef<HTMLInputElement>(null);
+  const modalInputRef = useRef<HTMLInputElement>(null);
   const parentRef = useRef<HTMLDivElement>(null);
 
   // State refs to ensure listeners always see current values
@@ -249,17 +265,28 @@ export default function App() {
     }
   }
 
+  // Load jobs list from backend
+  async function refreshJobs() {
+    try {
+      const list = await client.listJobs(30);
+      setJobs(list);
+    } catch {
+      // Ignore
+    }
+  }
+
   // Bootstrap app and load settings
   useEffect(() => {
     let mounted = true;
 
-    Promise.all([client.bootstrap(), client.loadSettings()])
-      .then(([bootData, settings]) => {
+    Promise.all([client.bootstrap(), client.loadSettings(), client.listJobs(20)])
+      .then(([bootData, settings, jobList]) => {
         if (!mounted) return;
         setKnownFolders(bootData.known_folders);
         setDrives(bootData.drives);
         setFavorites(settings.favorites || []);
         setTheme(settings.theme || "system");
+        setJobs(jobList || []);
         applyTheme(settings.theme || "system");
 
         if (settings.restore_tabs && settings.saved_tabs && settings.saved_tabs.length > 0) {
@@ -303,12 +330,10 @@ export default function App() {
   // Tab switching
   function switchTab(newIndex: number) {
     if (newIndex === activeTabIndex || newIndex < 0 || newIndex >= tabs.length) return;
-    // Save current scroll
     if (parentRef.current) {
       updateActiveTab({ scrollTop: parentRef.current.scrollTop });
     }
     setActiveTabIndex(newIndex);
-    // Restore new tab's scroll
     const targetScroll = tabs[newIndex].scrollTop || 0;
     requestAnimationFrame(() => {
       if (parentRef.current) {
@@ -427,7 +452,6 @@ export default function App() {
     try {
       const nav = await client.openItem(cur.folderToken, entry.token);
       if (nav) {
-        // Navigated into subfolder
         updateActiveTab((prev) => {
           const nextIndex = prev.historyIndex + 1;
           const newHist = [...prev.history.slice(0, nextIndex), nav.path_display];
@@ -562,7 +586,7 @@ export default function App() {
       await client.addFavorite(path);
       setFavorites((prev) => (prev.includes(path) ? prev : [...prev, path]));
     } catch {
-      // Ignore or log error
+      // Ignore
     }
   }
 
@@ -572,6 +596,68 @@ export default function App() {
       setFavorites((prev) => prev.filter((p) => p !== path));
     } catch {
       // Ignore
+    }
+  }
+
+  // Modal dialog handlers (New Folder & Rename)
+  function openCreateFolderModal() {
+    if (!activeTab.folderToken) return;
+    setContextMenu(null);
+    setModal({
+      type: "create_folder",
+      title: "New Folder",
+      value: "New folder",
+      folderToken: activeTab.folderToken,
+    });
+    setTimeout(() => {
+      modalInputRef.current?.focus();
+      modalInputRef.current?.select();
+    }, 50);
+  }
+
+  function openRenameModal(entry?: FileEntry) {
+    const targetEntry =
+      entry ||
+      (activeTab.selectedTokens.size === 1
+        ? displayedEntries.find((e) => e.token === Array.from(activeTab.selectedTokens)[0])
+        : undefined);
+
+    if (!targetEntry || !activeTab.folderToken) return;
+    setContextMenu(null);
+    setModal({
+      type: "rename",
+      title: `Rename "${targetEntry.display_name}"`,
+      value: targetEntry.display_name,
+      folderToken: activeTab.folderToken,
+      itemToken: targetEntry.token,
+    });
+    setTimeout(() => {
+      modalInputRef.current?.focus();
+      modalInputRef.current?.select();
+    }, 50);
+  }
+
+  async function handleModalSubmit(e?: React.FormEvent) {
+    if (e) e.preventDefault();
+    if (!modal) return;
+    const trimmed = modal.value.trim();
+    if (!trimmed) {
+      setModal({ ...modal, error: "Name cannot be empty" });
+      return;
+    }
+
+    try {
+      if (modal.type === "create_folder") {
+        await client.createFolder(modal.folderToken, trimmed);
+      } else if (modal.type === "rename" && modal.itemToken) {
+        await client.renameItem(modal.folderToken, modal.itemToken, trimmed);
+      }
+      setModal(null);
+      refresh();
+      refreshJobs();
+    } catch (err: any) {
+      setModal({ ...modal, error: err?.user_message || "Operation failed" });
+      refreshJobs();
     }
   }
 
@@ -614,9 +700,57 @@ export default function App() {
   // Global Keyboard shortcuts
   useEffect(() => {
     function handleKeyDown(e: KeyboardEvent) {
+      // Escape -> Dismiss modal, context menu, drawer, or clear selection
+      if (e.key === "Escape") {
+        if (modal) {
+          setModal(null);
+          return;
+        }
+        if (contextMenu) {
+          setContextMenu(null);
+          return;
+        }
+        if (showJobsDrawer) {
+          setShowJobsDrawer(false);
+          return;
+        }
+        if (
+          document.activeElement instanceof HTMLInputElement ||
+          document.activeElement instanceof HTMLTextAreaElement
+        ) {
+          (document.activeElement as HTMLElement).blur();
+        } else {
+          updateActiveTab({ selectedTokens: new Set() });
+        }
+        return;
+      }
+
+      // If modal is active, enter submits
+      if (modal) {
+        if (e.key === "Enter") {
+          e.preventDefault();
+          handleModalSubmit();
+        }
+        return;
+      }
+
       const isInputActive =
         document.activeElement instanceof HTMLInputElement ||
         document.activeElement instanceof HTMLTextAreaElement;
+
+      // Ctrl+Shift+N -> New Folder
+      if (e.ctrlKey && e.shiftKey && (e.key === "n" || e.key === "N")) {
+        e.preventDefault();
+        openCreateFolderModal();
+        return;
+      }
+
+      // F2 -> Rename single selected item
+      if (e.key === "F2" && !isInputActive) {
+        e.preventDefault();
+        openRenameModal();
+        return;
+      }
 
       // Alt+Left -> Back
       if (e.altKey && e.key === "ArrowLeft") {
@@ -672,19 +806,6 @@ export default function App() {
       if (e.key === "F5") {
         e.preventDefault();
         refresh();
-        return;
-      }
-      // Escape -> Clear context menu, blur input, or deselect
-      if (e.key === "Escape") {
-        if (contextMenu) {
-          setContextMenu(null);
-          return;
-        }
-        if (isInputActive) {
-          (document.activeElement as HTMLElement).blur();
-        } else {
-          updateActiveTab({ selectedTokens: new Set() });
-        }
         return;
       }
 
@@ -750,7 +871,7 @@ export default function App() {
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [displayedEntries, contextMenu]);
+  }, [displayedEntries, contextMenu, modal, showJobsDrawer]);
 
   return (
     <div className="app-container" onContextMenu={handleBackgroundContextMenu}>
@@ -812,6 +933,16 @@ export default function App() {
               🔄
             </button>
           </div>
+
+          <button
+            className="action-btn"
+            onClick={openCreateFolderModal}
+            title="New Folder (Ctrl+Shift+N)"
+            aria-label="New folder"
+          >
+            <span>📁+</span>
+            <span>New Folder</span>
+          </button>
 
           <form
             className="address-bar-container"
@@ -1044,6 +1175,17 @@ export default function App() {
           {activeTab.selectedTokens.size > 0 && ` | ${activeTab.selectedTokens.size} selected`}
         </span>
         <span className="status-spacer"></span>
+        <button
+          className="action-btn"
+          style={{ padding: "2px 8px", fontSize: "11px", marginRight: "8px" }}
+          onClick={() => {
+            setShowJobsDrawer(!showJobsDrawer);
+            refreshJobs();
+          }}
+          title="Toggle Jobs Drawer"
+        >
+          ⚡ Jobs {jobs.length > 0 && `(${jobs.length})`}
+        </button>
         <span>{activeTab.path}</span>
       </footer>
 
@@ -1066,6 +1208,16 @@ export default function App() {
               >
                 <span>Open</span>
                 <span className="context-menu-shortcut">Enter</span>
+              </div>
+              <div
+                className="context-menu-item"
+                onClick={() => {
+                  const entry = contextMenu.entry!;
+                  openRenameModal(entry);
+                }}
+              >
+                <span>Rename</span>
+                <span className="context-menu-shortcut">F2</span>
               </div>
               <div
                 className="context-menu-item"
@@ -1110,6 +1262,15 @@ export default function App() {
               <div
                 className="context-menu-item"
                 onClick={() => {
+                  openCreateFolderModal();
+                }}
+              >
+                <span>New Folder</span>
+                <span className="context-menu-shortcut">Ctrl+Shift+N</span>
+              </div>
+              <div
+                className="context-menu-item"
+                onClick={() => {
                   setContextMenu(null);
                   refresh();
                 }}
@@ -1148,6 +1309,91 @@ export default function App() {
               </div>
             </>
           )}
+        </div>
+      )}
+
+      {/* Modal Dialog (New Folder / Rename) */}
+      {modal && (
+        <div className="modal-overlay" onClick={() => setModal(null)}>
+          <div className="modal-container" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-header">{modal.title}</div>
+            <form onSubmit={handleModalSubmit}>
+              <div className="modal-body">
+                <input
+                  ref={modalInputRef}
+                  type="text"
+                  className="modal-input"
+                  value={modal.value}
+                  onChange={(e) => setModal({ ...modal, value: e.target.value, error: null })}
+                  placeholder="Enter name..."
+                />
+                {modal.error && (
+                  <div style={{ color: "var(--error-text)", fontSize: "12px" }}>
+                    ⚠️ {modal.error}
+                  </div>
+                )}
+              </div>
+              <div className="modal-footer">
+                <button
+                  type="button"
+                  className="modal-btn modal-btn-secondary"
+                  onClick={() => setModal(null)}
+                >
+                  Cancel
+                </button>
+                <button type="submit" className="modal-btn modal-btn-primary">
+                  {modal.type === "create_folder" ? "Create" : "Rename"}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Job Drawer */}
+      {showJobsDrawer && (
+        <div className="jobs-drawer">
+          <div className="jobs-header">
+            <span>Operation Jobs ({jobs.length})</span>
+            <div className="jobs-header-actions">
+              <button
+                className="jobs-close-btn"
+                onClick={() => setShowJobsDrawer(false)}
+                title="Close"
+              >
+                ×
+              </button>
+            </div>
+          </div>
+          <div className="jobs-list">
+            {jobs.length === 0 ? (
+              <div className="jobs-empty-note">No recent operation jobs</div>
+            ) : (
+              jobs.map((job) => (
+                <div key={job.id} className="job-card">
+                  <div className="job-card-header">
+                    <span className="job-card-title">{job.kind.replace("_", " ")}</span>
+                    <span className={`job-badge ${job.state}`}>{job.state}</span>
+                  </div>
+                  <div className="job-card-details">
+                    <span>
+                      {job.completed_items}/{job.total_items} items
+                    </span>
+                    <span>
+                      {new Date(job.created_at_epoch * 1000).toLocaleTimeString([], {
+                        hour: "2-digit",
+                        minute: "2-digit",
+                        second: "2-digit",
+                      })}
+                    </span>
+                  </div>
+                  {job.error_message && (
+                    <div className="job-card-error">⚠️ {job.error_message}</div>
+                  )}
+                </div>
+              ))
+            )}
+          </div>
         </div>
       )}
     </div>

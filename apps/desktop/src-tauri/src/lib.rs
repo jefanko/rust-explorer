@@ -22,7 +22,13 @@ pub fn run() {
             commands::load_settings,
             commands::save_settings,
             commands::add_favorite,
-            commands::remove_favorite
+            commands::remove_favorite,
+            commands::plan_create_folder,
+            commands::plan_rename,
+            commands::commit_plan,
+            commands::create_folder,
+            commands::rename_item,
+            commands::list_jobs
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

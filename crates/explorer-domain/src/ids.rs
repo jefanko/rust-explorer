@@ -114,6 +114,22 @@ impl Default for RootId {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct CommitToken(pub String);
+
+impl CommitToken {
+    pub fn new() -> Self {
+        Self(Uuid::new_v4().to_string())
+    }
+}
+
+impl Default for CommitToken {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl fmt::Display for ItemToken {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.0)

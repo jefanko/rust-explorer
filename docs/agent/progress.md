@@ -70,5 +70,37 @@
 - Added unit tests in `apps/desktop/ui/src/test/App.test.tsx` verifying formatting, tab title extraction, and selection range computation.
 - Verified with `.\scripts\check.ps1` (0 warnings, 0 errors, all Rust + UI tests passing).
 - Packaged offline standalone binary `rust-explorer.exe` with embedded assets via `npx tauri build --debug --no-bundle`.
+## Milestone M3 — Native Mutation Vertical Slice [COMPLETE]
 
-**Next Milestone**: Milestone M3 — Native Mutation Vertical Slice (Dedicated COM STA worker for `IFileOperation`, immutable operation plans, single-use commit tokens, create-folder and rename, job drawer UI).
+### Step 1: STA COM Worker & Shell Operation Pipeline
+- Implemented `crates/explorer-win/src/com.rs`:
+  - `StaWorker`: Dedicated OS thread initialized with `CoInitializeEx(None, COINIT_APARTMENTTHREADED)` and an internal task queue. Guarantees `IFileOperation` runs safely on a single STA thread without blocking the UI thread or Tauri async worker pool.
+- Implemented `crates/explorer-win/src/shell.rs`:
+  - `shell_create_folder`: Creates a new folder via Win32 `IFileOperation` (`NewItem`), `IShellItem`, and checks `GetAnyOperationsAborted()`.
+  - `shell_rename_item`: Renames an existing file or directory via Win32 `IFileOperation` (`RenameItem`) and checks `GetAnyOperationsAborted()`.
+  - Unit test `test_shell_create_folder_and_rename_in_sta` tests end-to-end STA dispatch on a dedicated temporary test fixture directory.
+
+### Step 2: Job Models, Planning & SQLite Journal
+- Extended `crates/explorer-domain`:
+  - `CommitToken`: Unique single-use token tied to each planned operation.
+  - `OperationPlan`, `JobState`, `ItemStatus`, `ItemOutcome`, `JobSummary` types in `operations.rs`.
+- Implemented `crates/explorer-store/src/journal.rs`:
+  - `JobJournal`: Persistent SQLite table `job_journal` tracking job history, state transitions (`Validating`, `Queued`, `Running`, `Completed`, `Failed`, `Canceled`, `Interrupted`), error records, and start/finish epoch timestamps.
+  - Automatic interrupted job recovery: transitions any incomplete jobs left in `running`, `validating`, or `queued` state to `interrupted` upon app startup.
+- Implemented `crates/explorer-jobs`:
+  - `planner.rs`: DOS reserved name validation (`CON`, `PRN`, `AUX`, `NUL`, `COM1-9`, `LPT1-9`, control chars, trailing dots/spaces), path existence and conflict checks, and 5-minute expiry timestamp.
+  - `executor.rs`: Enforces single-use `commit_token` idempotency, records state transitions in `JobJournal`, and dispatches operations to `StaWorker`.
+  - `queue.rs`: `OperationService` coordinating planner, executor, and journal.
+
+### Step 3: Tauri IPC & Frontend Job Drawer
+- Extended `apps/desktop/src-tauri`:
+  - `state.rs`: Registered `StaWorker`, `JobJournal`, and `OperationService` in `AppState`. Invokes `recover_interrupted_jobs()` on app bootstrap.
+  - `commands.rs`: Exposed IPC commands `plan_create_folder`, `plan_rename`, `commit_plan`, `create_folder`, `rename_item`, and `list_jobs`.
+- Enhanced `apps/desktop/ui`:
+  - `bridge/client.ts` & `bridge/types.ts`: TypeScript bindings for operation planning, commits, and job history.
+  - Interactive Folder Creation: "📁+ New Folder" button in navbar, context menu action, and `Ctrl+Shift+N` shortcut with modal prompt.
+  - Interactive Item Rename: Context menu action and `F2` shortcut with modal prompt.
+  - Job Drawer: Slide-out drawer displaying recent operations, state badges (`Completed`, `Failed`, `Canceled`, `Running`), timestamps, and error details.
+  - Verification: `.\scripts\check.ps1` passed 100% (format, clippy, unit tests, TypeScript, build:ui, doctor), and standalone `rust-explorer.exe` built.
+
+**Next Milestone**: Milestone M4 — Everyday File Operations (Copy & Move via `IFileOperation`, guarded Recycle Bin deletion, and Windows Explorer `CF_HDROP` clipboard interoperability).

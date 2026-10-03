@@ -4,6 +4,8 @@ import {
   DirectoryPage,
   NavigationResponse,
   AppSettings,
+  JobSummary,
+  OperationPlan,
   SortColumn,
   SortDirection,
 } from "./types";
@@ -83,5 +85,57 @@ export const client = {
 
   async removeFavorite(path: string): Promise<void> {
     return invoke<void>("remove_favorite", { path });
+  },
+
+  async planCreateFolder(
+    folderToken: string,
+    name: string
+  ): Promise<OperationPlan> {
+    return invoke<OperationPlan>("plan_create_folder", {
+      folderToken,
+      name,
+    });
+  },
+
+  async planRename(
+    folderToken: string,
+    itemToken: string,
+    newName: string
+  ): Promise<OperationPlan> {
+    return invoke<OperationPlan>("plan_rename", {
+      folderToken,
+      itemToken,
+      newName,
+    });
+  },
+
+  async commitPlan(plan: OperationPlan): Promise<JobSummary> {
+    return invoke<JobSummary>("commit_plan", { plan });
+  },
+
+  async createFolder(
+    folderToken: string,
+    name: string
+  ): Promise<JobSummary> {
+    return invoke<JobSummary>("create_folder", {
+      folderToken,
+      name,
+    });
+  },
+
+  async renameItem(
+    folderToken: string,
+    itemToken: string,
+    newName: string
+  ): Promise<JobSummary> {
+    return invoke<JobSummary>("rename_item", {
+      folderToken,
+      itemToken,
+      newName,
+    });
+  },
+
+  async listJobs(limit?: number): Promise<JobSummary[]> {
+    return invoke<JobSummary[]>("list_jobs", { limit });
   },
 };

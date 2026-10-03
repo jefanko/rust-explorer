@@ -5,4 +5,5 @@ pub mod journal;
 pub mod migrations;
 pub mod settings;
 
+pub use journal::JobJournal;
 pub use settings::{AppSettings, SettingsStore};

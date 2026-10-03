@@ -7,3 +7,6 @@ pub mod progress;
 pub mod queue;
 pub mod recovery;
 pub mod shell_backend;
+
+pub use executor::JobExecutor;
+pub use queue::OperationService;

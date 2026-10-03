@@ -63,3 +63,41 @@ export interface AppSettings {
   saved_tabs: string[];
   favorites: string[];
 }
+
+export type OperationKind = "copy" | "move" | "rename" | "create_folder" | "recycle";
+
+export type JobState =
+  | "planned"
+  | "queued"
+  | "validating"
+  | "running"
+  | "succeeded"
+  | "partial_failure"
+  | "failed"
+  | "cancel_requested"
+  | "canceled"
+  | "interrupted";
+
+export interface OperationPlan {
+  id: string;
+  commit_token: string;
+  kind: OperationKind;
+  source_paths: string[];
+  destination_path?: string | null;
+  target_name?: string | null;
+  items_count: number;
+  expires_at: number;
+}
+
+export interface JobSummary {
+  id: string;
+  plan_id: string;
+  kind: OperationKind;
+  state: JobState;
+  total_items: number;
+  completed_items: number;
+  failed_items: number;
+  error_message?: string | null;
+  created_at_epoch: number;
+  updated_at_epoch: number;
+}

@@ -22,11 +22,11 @@
 - [x] **M2.4 Native Open & Properties**: `ShellExecuteExW` file association launch and native properties dialog.
 - [x] **M2.5 Persistent Preferences**: Settings store for theme, favorites, tab restoration, column widths.
 
-## Milestone M3 — Native Mutation Vertical Slice
-- [ ] **M3.1 Dedicated COM STA Worker**: File operation STA thread with message pump for `IFileOperation`.
-- [ ] **M3.2 Job Model & State Machine**: Planning, tokens, immutable plans, single-use commit, journal transitions.
-- [ ] **M3.3 Create Folder & Rename Slice**: Implement create-folder and rename via Shell backend with pre/post callbacks.
-- [ ] **M3.4 Job Drawer UI**: Drawer showing progress, outcomes, and failure states.
+## Milestone M3 — Native Mutation Vertical Slice [COMPLETE]
+- [x] **M3.1 Dedicated COM STA Worker**: File operation STA thread with message pump for `IFileOperation`.
+- [x] **M3.2 Job Model & State Machine**: Planning, tokens, immutable plans, single-use commit, journal transitions.
+- [x] **M3.3 Create Folder & Rename Slice**: Implement create-folder and rename via Shell backend with pre/post callbacks.
+- [x] **M3.4 Job Drawer UI**: Drawer showing progress, outcomes, and failure states.
 
 ## Milestone M4 — Everyday File Operations
 - [ ] **M4.1 Copy & Move via Shell**: Execute copy/move jobs with conflict resolution via native dialogs.

@@ -27,17 +27,25 @@
   - SQLite `SettingsStore` (`kv_store` and `favorites` tables), sidebar Favorites, and Theme switcher.
   - All fast verification suite checks and standalone packaging passing.
 
+- **Milestone M3 — Native Mutation Vertical Slice**: 100% COMPLETE.
+  - Dedicated COM STA worker thread (`StaWorker`) running `IFileOperation`.
+  - Job model & state machine: `CommitToken`, immutable `OperationPlan`, `JobExecutor`, and SQLite `JobJournal`.
+  - Create Folder & Rename slice with DOS name validation, conflict detection, and cancelable execution.
+  - Interactive Job Drawer UI with operation history, badges, and modals.
+  - All tests and verification checks passing (`.\scripts\check.ps1`).
+
 ## Current Milestone
-- **Milestone**: M3 — Native Mutation Vertical Slice
+- **Milestone**: M4 — Everyday File Operations
 - **Active Tickets**:
-  - `M3.1 Dedicated COM STA Worker`: File operation STA thread with message pump for `IFileOperation`.
-  - `M3.2 Job Model & State Machine`: Planning, tokens, immutable plans, single-use commit, journal transitions.
-  - `M3.3 Create Folder & Rename Slice`: Implement create-folder and rename via Shell backend with pre/post callbacks.
-  - `M3.4 Job Drawer UI`: Drawer showing progress, outcomes, and failure states.
+  - `M4.1 Copy & Move via Shell`: Execute copy/move jobs with conflict resolution via native Shell backend.
+  - `M4.2 Guarded Recycle`: Recycle Bin deletion with `FOFX_RECYCLEONDELETE` and `PreDeleteItem` checks (no silent fallback).
+  - `M4.3 Cancellation & Partial Outcomes`: Cooperative cancellation, item-level outcome recording, retry planning.
+  - `M4.4 Explorer Clipboard Interoperability`: `CF_HDROP` copy/cut/paste interoperable with Windows Explorer.
 
 ## Next Commands
-1. Implement dedicated COM STA worker thread in `explorer-win` / `explorer-jobs`.
-2. Implement immutable mutation planner and journal in `explorer-jobs` and `explorer-store`.
-3. Implement `create_folder` and `rename_item` Tauri commands with progress reporting.
-4. Add Job Drawer UI in frontend to display operation status and outcomes.
-5. Run `.\scripts\check.ps1`.
+1. Implement Shell copy and move operations in `crates/explorer-win/src/shell.rs` via `IFileOperation::CopyItem` and `IFileOperation::MoveItem`.
+2. Implement guarded Recycle Bin deletion via `IFileOperation::DeleteItem` with `FOFX_RECYCLEONDELETE` and capability checks.
+3. Extend planner and executor in `crates/explorer-jobs` for copy, move, and recycle.
+4. Implement Windows clipboard format reading/writing (`CF_HDROP` / `Preferred DropEffect`) for seamless copy/cut/paste with Windows Explorer.
+5. Add copy/cut/paste/delete actions to UI context menus, keyboard shortcuts (<kbd>Ctrl+C</kbd>, <kbd>Ctrl+X</kbd>, <kbd>Ctrl+V</kbd>, <kbd>Delete</kbd>), and verify with `.\scripts\check.ps1`.
+

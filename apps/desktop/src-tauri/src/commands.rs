@@ -4,6 +4,7 @@ use explorer_domain::ids::{FolderToken, ItemToken, SessionId};
 use explorer_domain::models::{
     BootstrapData, DirectoryPage, NavigationResponse, SortColumn, SortDirection,
 };
+use explorer_domain::operations::{JobSummary, OperationPlan};
 use explorer_store::AppSettings;
 use explorer_win::known_folders::{get_logical_drives, get_standard_known_folders};
 use explorer_win::shell::{
@@ -208,4 +209,98 @@ pub async fn remove_favorite(
     state: State<'_, AppState>,
 ) -> Result<(), ExplorerError> {
     state.settings_store.remove_favorite(&path)
+}
+
+#[tauri::command]
+pub async fn plan_create_folder(
+    folder_token: FolderToken,
+    name: String,
+    state: State<'_, AppState>,
+) -> Result<OperationPlan, ExplorerError> {
+    let parent = state
+        .folder_service
+        .get_folder_path(&folder_token)
+        .ok_or_else(|| {
+            ExplorerError::new(
+                ErrorCode::NotFound,
+                "Folder token not found",
+                "plan_create_folder",
+            )
+        })?;
+
+    state.operation_service.plan_create_folder(&parent, &name)
+}
+
+#[tauri::command]
+pub async fn plan_rename(
+    folder_token: FolderToken,
+    item_token: ItemToken,
+    new_name: String,
+    state: State<'_, AppState>,
+) -> Result<OperationPlan, ExplorerError> {
+    let source = state
+        .folder_service
+        .resolve_item(&folder_token, &item_token)
+        .ok_or_else(|| {
+            ExplorerError::new(ErrorCode::NotFound, "Item token not found", "plan_rename")
+        })?;
+
+    state.operation_service.plan_rename(&source, &new_name)
+}
+
+#[tauri::command]
+pub async fn commit_plan(
+    plan: OperationPlan,
+    state: State<'_, AppState>,
+) -> Result<JobSummary, ExplorerError> {
+    state.operation_service.commit_plan(&plan)
+}
+
+#[tauri::command]
+pub async fn create_folder(
+    folder_token: FolderToken,
+    name: String,
+    state: State<'_, AppState>,
+) -> Result<JobSummary, ExplorerError> {
+    let parent = state
+        .folder_service
+        .get_folder_path(&folder_token)
+        .ok_or_else(|| {
+            ExplorerError::new(
+                ErrorCode::NotFound,
+                "Folder token not found",
+                "create_folder",
+            )
+        })?;
+
+    state
+        .operation_service
+        .execute_create_folder(&parent, &name)
+}
+
+#[tauri::command]
+pub async fn rename_item(
+    folder_token: FolderToken,
+    item_token: ItemToken,
+    new_name: String,
+    state: State<'_, AppState>,
+) -> Result<JobSummary, ExplorerError> {
+    let source = state
+        .folder_service
+        .resolve_item(&folder_token, &item_token)
+        .ok_or_else(|| {
+            ExplorerError::new(ErrorCode::NotFound, "Item token not found", "rename_item")
+        })?;
+
+    state.operation_service.execute_rename(&source, &new_name)
+}
+
+#[tauri::command]
+pub async fn list_jobs(
+    limit: Option<usize>,
+    state: State<'_, AppState>,
+) -> Result<Vec<JobSummary>, ExplorerError> {
+    state
+        .operation_service
+        .list_recent_jobs(limit.unwrap_or(20))
 }
