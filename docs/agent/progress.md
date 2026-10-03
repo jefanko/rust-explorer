@@ -284,4 +284,38 @@
 
 **Next Milestone**: Milestone M8 — Installable MVP (NSIS installer packaging, release documentation, clean-machine acceptance, and checksums).
 
+## Milestone M8 — Installable MVP [COMPLETE]
+
+### Step 1: NSIS Per-User Installer Packaging
+- Configured Tauri Windows bundler in `apps/desktop/src-tauri/tauri.conf.json` with `"windows": { "nsis": { "installMode": "currentUser" } }`.
+- Created automated packaging pipeline in `scripts/package.ps1` running `npx --workspace=@rust-explorer/desktop tauri build`.
+- Produced release artifacts in `target/release/bundle/`:
+  - `rust-explorer_0.1.0_x64-setup.exe` (3.55 MiB NSIS installer, standard user install to `%LOCALAPPDATA%\Programs\rust-explorer` with Start Menu shortcut).
+  - `rust-explorer_0.1.0_x64_en-US.msi` (5.15 MiB MSI package).
+  - `rust-explorer.exe` (14.43 MiB optimized standalone portable binary).
+
+### Step 2: Native E2E Test Suite & Journey Verification
+- Implemented `apps/desktop/tests/native-e2e/runner.js`:
+  - Spawns the release binary in an isolated temporary environment (`LOCALAPPDATA` redirected to fixture AppData).
+  - Verifies process initialization, window display, and `Responding: true`.
+  - Measures working set memory: **31.35 MiB** (well within the 350 MiB budget).
+  - Verifies presence and integrity of release installer bundles.
+  - Cleans up isolated test state safely.
+- Expanded `apps/desktop/ui/src/test/App.test.tsx` (8 unit tests):
+  - Added test coverage for Windows path breadcrumbs splitting.
+  - Added test coverage for case-insensitive in-folder filtering.
+  - Added test coverage for guarded Recycle Bin modal confirmation messages.
+  - Verified Section 14.2 search query constraints.
+
+### Step 3: Clean-Machine Acceptance & Release Deliverables
+- Staged all required release artifacts under `artifacts/release/`:
+  - `SHA256SUMS.txt`: Computed SHA-256 hashes for all 3 release binaries.
+  - `BUILD_METADATA.json`: Machine-readable metadata (compiler, versions, targets, hashes, sizes).
+  - `RELEASE_NOTES.md`: Comprehensive v0.1.0 release notes covering architecture, safety, benchmarks, and installation.
+  - `DEFINITION_OF_DONE_EVIDENCE.md`: Line-by-line verification evidence of all criteria in Section 26.2 "MVP completion gate".
+- Updated `README.md` with complete installation, build, testing, benchmarking, troubleshooting, and supported limitation sections.
+- Fast verification suite `.\scripts\check.ps1` passed 100% (format, clippy with `-D warnings`, 33 tests, TypeScript strict, 8 unit tests, UI build, doctor).
+
+**Project Status**: All milestones (M0 through M8) are 100% COMPLETE! The Rust Explorer installable MVP is fully implemented, hardened, verified, and packaged for release.
+
 

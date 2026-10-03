@@ -145,5 +145,17 @@ Every entry records: Date (UTC/Local), Milestone, Command executed, Build/Commit
 | 2026-10-04 | M7.3 | Security Audit & CSP check | PASS | Content Security Policy reviewed; window label `"main"` bound to capability `"main-capability"`; webview permissions restricted to `"core:default"` with no shell exec plugins exposed. |
 | 2026-10-04 | M7.3 | `.\scripts\check.ps1` | PASS | Fast verification suite passes 100% (format, clippy with `-D warnings`, 33 tests, TypeScript strict, Vitest, UI build, doctor). |
 
+---
+
+### M8 Validation Log
+
+| Date | Step | Command | Result | Evidence / Output |
+|---|---|---|---|---|
+| 2026-10-04 | M8.1 | `.\scripts\package.ps1` | PASS | Built release bundles: NSIS setup (`rust-explorer_0.1.0_x64-setup.exe`, 3.55 MiB), MSI bundle (`rust-explorer_0.1.0_x64_en-US.msi`, 5.15 MiB), and release executable (`rust-explorer.exe`, 14.43 MiB). |
+| 2026-10-04 | M8.2 | `npm run test:e2e:native` | PASS | Native E2E test runner verified: clean process launch (PID 40480), `Responding: true`, working set memory 31.35 MiB (<350 MiB budget), isolated AppData state initialization, and distribution bundle existence. |
+| 2026-10-04 | M8.2 | `npm run test:unit` | PASS | 8 unit tests in `App.test.tsx` passed, validating path breadcrumbs, case-insensitive filtering, recycle modal prompt formatting, and query constraints. |
+| 2026-10-04 | M8.3 | Release Staging & Verification | PASS | Computed SHA-256 hashes (`artifacts/release/SHA256SUMS.txt`), authored release metadata (`artifacts/release/BUILD_METADATA.json`), official release notes (`artifacts/release/RELEASE_NOTES.md`), and full Definition of Done evidence report (`artifacts/release/DEFINITION_OF_DONE_EVIDENCE.md`). |
+| 2026-10-04 | M8.3 | `.\scripts\check.ps1` | PASS | Fast verification suite passed 100% (format, clippy with `-D warnings`, 33 tests, TypeScript strict, 8 unit tests, UI build, doctor). |
+
 
 

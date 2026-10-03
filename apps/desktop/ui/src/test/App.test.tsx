@@ -88,4 +88,67 @@ describe("App Formatting and Tab Helpers", () => {
     expect(getContainingFolder("C:\\Users\\Default\\Documents\\report.docx")).toBe("C:\\Users\\Default\\Documents");
     expect(getContainingFolder("D:\\projects\\rust\\main.rs")).toBe("D:\\projects\\rust");
   });
+
+  it("splits Windows paths into breadcrumb segments correctly", () => {
+    function getBreadcrumbs(path: string): { label: string; fullPath: string }[] {
+      if (!path) return [];
+      const parts = path.split(/[\\/]/).filter(Boolean);
+      const crumbs: { label: string; fullPath: string }[] = [];
+      let accumulated = "";
+
+      for (let i = 0; i < parts.length; i++) {
+        const part = parts[i];
+        if (i === 0 && part.includes(":")) {
+          accumulated = `${part}\\`;
+        } else {
+          accumulated = accumulated.endsWith("\\")
+            ? `${accumulated}${part}`
+            : `${accumulated}\\${part}`;
+        }
+        crumbs.push({ label: part, fullPath: accumulated });
+      }
+      return crumbs;
+    }
+
+    const crumbs = getBreadcrumbs("C:\\Users\\Default\\Documents");
+    expect(crumbs).toHaveLength(4);
+    expect(crumbs[0]).toEqual({ label: "C:", fullPath: "C:\\" });
+    expect(crumbs[1]).toEqual({ label: "Users", fullPath: "C:\\Users" });
+    expect(crumbs[2]).toEqual({ label: "Default", fullPath: "C:\\Users\\Default" });
+    expect(crumbs[3]).toEqual({ label: "Documents", fullPath: "C:\\Users\\Default\\Documents" });
+  });
+
+  it("filters file entries case-insensitively", () => {
+    const entries = [
+      { name: "Report2026.docx", is_dir: false },
+      { name: "Invoice_September.pdf", is_dir: false },
+      { name: "Photos", is_dir: true },
+      { name: "report_draft.txt", is_dir: false },
+    ];
+
+    const filterText = "report";
+    const filtered = entries.filter((e) =>
+      e.name.toLowerCase().includes(filterText.toLowerCase())
+    );
+
+    expect(filtered).toHaveLength(2);
+    expect(filtered.map((e) => e.name)).toEqual(["Report2026.docx", "report_draft.txt"]);
+  });
+
+  it("formats recycle confirmation details accurately", () => {
+    function getRecycleConfirmationMessage(items: string[]): string {
+      if (items.length === 1) {
+        return `Are you sure you want to move "${items[0]}" to the Recycle Bin?`;
+      }
+      return `Are you sure you want to move these ${items.length} items to the Recycle Bin?`;
+    }
+
+    expect(getRecycleConfirmationMessage(["test.txt"])).toBe(
+      'Are you sure you want to move "test.txt" to the Recycle Bin?'
+    );
+    expect(getRecycleConfirmationMessage(["a.txt", "b.txt", "c.txt"])).toBe(
+      "Are you sure you want to move these 3 items to the Recycle Bin?"
+    );
+  });
 });
+

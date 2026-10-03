@@ -69,17 +69,22 @@
   - Security audit: strict CSP, window `"main"` capability binding, `"core:default"` webview permissions, `ShellProgressSink` guarded recycle.
   - Fast verification suite passed (`.\scripts\check.ps1`, 33 tests, 0 warnings).
 
-## Current Milestone
-- **Milestone**: M8 — Installable MVP
-- **Active Tickets**:
-  - `M8.1 NSIS Installer`: Per-user NSIS installer packaging with Start Menu shortcut.
-  - `M8.2 Native E2E Test Suite`: Verify desktop launch and full user journey on Windows 11.
-  - `M8.3 Clean-Machine Acceptance`: Build final release installer, compute SHA-256 checksums, and verify definition-of-done checklist.
+- **Milestone M8 — Installable MVP**: 100% COMPLETE.
+  - Per-user NSIS installer built (`target/release/bundle/nsis/rust-explorer_0.1.0_x64-setup.exe`, 3.55 MiB) installing to `%LOCALAPPDATA%\Programs\rust-explorer` with Start Menu shortcut.
+  - Windows MSI installer built (`target/release/bundle/msi/rust-explorer_0.1.0_x64_en-US.msi`, 5.15 MiB).
+  - Standalone release binary built (`target/release/rust-explorer.exe`, 14.43 MiB).
+  - Native E2E test runner (`npm run test:e2e:native`) verified clean desktop launch, responsive window, and 31.35 MiB working set memory.
+  - Staged official release deliverables: `artifacts/release/SHA256SUMS.txt`, `artifacts/release/BUILD_METADATA.json`, `artifacts/release/RELEASE_NOTES.md`, and `artifacts/release/DEFINITION_OF_DONE_EVIDENCE.md`.
+  - Full fast verification suite passed (`.\scripts\check.ps1`, 33 tests, 0 warnings).
 
-## Next Commands
-1. Configure and run NSIS installer build using Tauri bundler: `npx tauri build`.
-2. Verify per-user installation mode (`currentUser`) without administrator requirement.
-3. Compute SHA-256 checksums and package release documentation.
-4. Execute definition-of-done acceptance checklist.
+## Project Status: MVP COMPLETE
+All milestones (M0 through M8) defined in `RUST_WINDOWS_EXPLORER_AGENT_SPEC.md` are 100% complete and verified against the acceptance criteria and performance budgets.
+
+## Post-MVP Roadmap
+- **v0.2 — Usability**: Dual pane view, thumbnail previews, internal drag-and-drop, and batch rename.
+- **v0.3 — Transfer Control**: Custom CopyFile2 backend, progress graph, and scoped undo research.
+- **v0.4 — Search Expansion**: Content extraction in isolated sandbox workers and USN journal indexing.
+- **v0.5 — Native Breadth**: OLE external drag/drop, Windows shell namespace browsing, and cloud provider hydration status.
+
 
 

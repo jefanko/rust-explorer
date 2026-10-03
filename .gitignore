@@ -13,7 +13,10 @@ apps/desktop/src-tauri/target/
 
 # Local work, test fixtures, and benchmark outputs
 work/
-artifacts/
+artifacts/*
+!artifacts/benchmarks/
+!artifacts/benchmarks/summary.md
+!artifacts/release/
 
 # System / Editor files
 Thumbs.db

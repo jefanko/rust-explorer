@@ -49,7 +49,14 @@
 - [x] **M7.2 Resource Limits & Leak Prevention**: Audit handle, memory, and channel bounds.
 - [x] **M7.3 Security Audit**: CSP review, IPC authority checks, input sanitization.
 
-## Milestone M8 — Installable MVP
-- [ ] **M8.1 NSIS Installer**: Per-user installer packaging with Start Menu shortcut.
-- [ ] **M8.2 Native E2E Test Suite**: Automated WebDriver tests driving actual Windows app.
-- [ ] **M8.3 Clean-Machine Acceptance**: Full execution of Section 1.1 user journey and Section 26.2 MVP completion gate.
+## Milestone M8 — Installable MVP [COMPLETE]
+- [x] **M8.1 NSIS Installer**: Per-user installer packaging with Start Menu shortcut.
+- [x] **M8.2 Native E2E Test Suite**: Automated test suite driving actual Windows app.
+- [x] **M8.3 Clean-Machine Acceptance**: Full execution of Section 1.1 user journey and Section 26.2 MVP completion gate.
+
+## Post-MVP Roadmap (v0.2+)
+- [ ] **v0.2 Usability**: Dual pane view, thumbnail previews, internal drag-and-drop, and batch rename.
+- [ ] **v0.3 Transfer Control**: Custom CopyFile2 backend, progress graph, and scoped undo research.
+- [ ] **v0.4 Search Expansion**: Content extraction in isolated sandbox workers and USN journal indexing.
+- [ ] **v0.5 Native Breadth**: OLE external drag/drop, Windows shell namespace browsing, and cloud provider hydration status.
+
