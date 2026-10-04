@@ -1,4 +1,5 @@
 import { describe, it, expect } from "vitest";
+import { matchFilterQuery } from "../app/App";
 
 function formatBytes(bytes?: number | null): string {
   if (bytes === null || bytes === undefined) return "";
@@ -56,8 +57,8 @@ describe("App Formatting and Tab Helpers", () => {
     function isValidSearchQuery(q: string): { valid: boolean; error?: string } {
       const trimmed = q.trim();
       if (!trimmed) return { valid: false };
-      const hasMetadataFilter = /ext:[^\s]+|type:(?:folder|file)/i.test(trimmed);
-      const textWithoutFilters = trimmed.replace(/ext:[^\s]+|type:[^\s]+/gi, "").trim();
+      const hasMetadataFilter = /(?:ext:|\*\.|\.)[a-z0-9_-]+|type:(?:folder|file)/i.test(trimmed);
+      const textWithoutFilters = trimmed.replace(/(?:ext:|\*\.|\.)[a-z0-9_-]+|type:[^\s]+/gi, "").trim();
       if (!hasMetadataFilter && textWithoutFilters.length < 3) {
         return { valid: false, error: "Use at least 3 characters for indexed search" };
       }
@@ -76,8 +77,36 @@ describe("App Formatting and Tab Helpers", () => {
     expect(isValidSearchQuery("abc").valid).toBe(true);
     expect(isValidSearchQuery("invoice").valid).toBe(true);
     expect(isValidSearchQuery("ext:pdf").valid).toBe(true);
+    expect(isValidSearchQuery("*.exe").valid).toBe(true);
+    expect(isValidSearchQuery(".exe").valid).toBe(true);
+    expect(isValidSearchQuery("*.c").valid).toBe(true);
+    expect(isValidSearchQuery(".c").valid).toBe(true);
     expect(isValidSearchQuery("type:folder").valid).toBe(true);
     expect(isValidSearchQuery("a ext:pdf").valid).toBe(true);
+    expect(isValidSearchQuery("a *.exe").valid).toBe(true);
+  });
+
+  it("filters folder entries using matchFilterQuery with extensions and globs", () => {
+    const exeFile = { display_name: "rust-explorer.exe", extension: "exe", kind: "file" };
+    const pdfFile = { display_name: "annual_report.pdf", extension: "pdf", kind: "file" };
+    const folder = { display_name: "src", extension: "", kind: "directory" };
+
+    // Direct extension filter
+    expect(matchFilterQuery(exeFile, "*.exe")).toBe(true);
+    expect(matchFilterQuery(exeFile, ".exe")).toBe(true);
+    expect(matchFilterQuery(exeFile, "ext:exe")).toBe(true);
+    expect(matchFilterQuery(pdfFile, "*.exe")).toBe(false);
+    expect(matchFilterQuery(pdfFile, ".pdf")).toBe(true);
+
+    // Wildcard glob
+    expect(matchFilterQuery(exeFile, "rust*")).toBe(true);
+    expect(matchFilterQuery(exeFile, "*explorer*")).toBe(true);
+    expect(matchFilterQuery(pdfFile, "*report*")).toBe(true);
+
+    // Type filter
+    expect(matchFilterQuery(folder, "type:folder")).toBe(true);
+    expect(matchFilterQuery(folder, "type:file")).toBe(false);
+    expect(matchFilterQuery(exeFile, "type:file")).toBe(true);
   });
 
   it("extracts containing folder path for search results", () => {

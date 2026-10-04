@@ -58,6 +58,79 @@ function getTabTitle(path: string): string {
   return parts.pop() || path || "PC";
 }
 
+export function matchFilterQuery(
+  entry: { display_name: string; extension: string; kind: string },
+  filterQuery: string
+): boolean {
+  const q = filterQuery.trim().toLowerCase();
+  if (!q) return true;
+
+  // Direct extension filter like *.exe or *.pdf
+  if (q.startsWith("*.")) {
+    const ext = q.slice(2).trim();
+    if (ext && ext !== "*") {
+      return (
+        entry.extension.toLowerCase() === ext ||
+        entry.display_name.toLowerCase().endsWith("." + ext)
+      );
+    }
+  }
+
+  // Direct dot-extension filter like .exe or .pdf
+  if (
+    q.startsWith(".") &&
+    q.length > 1 &&
+    !q.slice(1).includes(".") &&
+    !q.includes(" ") &&
+    !q.includes(":") &&
+    !q.includes("/") &&
+    !q.includes("\\")
+  ) {
+    const ext = q.slice(1);
+    return (
+      entry.extension.toLowerCase() === ext ||
+      entry.display_name.toLowerCase().endsWith("." + ext) ||
+      entry.display_name.toLowerCase().includes(q)
+    );
+  }
+
+  // ext: filter
+  if (q.startsWith("ext:")) {
+    const ext = q.slice(4).trim().replace(/^\./, "");
+    return entry.extension.toLowerCase() === ext;
+  }
+
+  // type: filter
+  if (q.startsWith("type:")) {
+    const type = q.slice(5).trim();
+    if (type === "folder" || type === "dir" || type === "directory") {
+      return entry.kind === "directory";
+    }
+    if (type === "file") {
+      return entry.kind === "file";
+    }
+  }
+
+  // Wildcard glob if contains * or ?
+  if (q.includes("*") || q.includes("?")) {
+    const regexPattern =
+      "^" +
+      q
+        .replace(/[-/\\^$+.,{}[\]()]/g, "\\$&")
+        .replace(/\*/g, ".*")
+        .replace(/\?/g, ".") +
+      "$";
+    try {
+      const re = new RegExp(regexPattern, "i");
+      return re.test(entry.display_name);
+    } catch {
+      // Fall back to substring match below
+    }
+  }
+
+  return entry.display_name.toLowerCase().includes(q);
+}
+
 function sameWindowsPath(left: number[], right: number[]): boolean {
   if (left.length !== right.length) return false;
   for (let index = 0; index < left.length; index += 1) {
@@ -214,8 +287,7 @@ export default function App() {
       ? activeTab.entries
       : activeTab.entries.filter((entry) => !entry.is_hidden);
     if (!activeTab.filterQuery.trim()) return visibleEntries;
-    const q = activeTab.filterQuery.toLowerCase();
-    return visibleEntries.filter((e) => e.display_name.toLowerCase().includes(q));
+    return visibleEntries.filter((e) => matchFilterQuery(e, activeTab.filterQuery));
   }, [activeTab.entries, activeTab.filterQuery, showHiddenFiles]);
 
   const visibleEntryCount = useMemo(
@@ -508,13 +580,14 @@ export default function App() {
     });
   }
 
+  const isAnyRootScanning = indexedRoots.some((r) => r.state === "scanning");
+
   // Poll for status updates if any indexed root is scanning
   useEffect(() => {
-    const hasScanning = indexedRoots.some((r) => r.state === "scanning");
-    if (!hasScanning) return;
-    const interval = setInterval(loadIndexedRoots, 2000);
+    if (!isAnyRootScanning) return;
+    const interval = setInterval(loadIndexedRoots, 1200);
     return () => clearInterval(interval);
-  }, [indexedRoots]);
+  }, [isAnyRootScanning]);
 
   // Debounced indexed search with query validation and cancellation
   useEffect(() => {
@@ -530,8 +603,8 @@ export default function App() {
       return;
     }
 
-    const hasMetadataFilter = /ext:[^\s]+|type:(?:folder|file)/i.test(q);
-    const textWithoutFilters = q.replace(/ext:[^\s]+|type:[^\s]+/gi, "").trim();
+    const hasMetadataFilter = /(?:ext:|\*\.|\.)[a-z0-9_-]+|type:(?:folder|file)/i.test(q);
+    const textWithoutFilters = q.replace(/(?:ext:|\*\.|\.)[a-z0-9_-]+|type:[^\s]+/gi, "").trim();
     if (!hasMetadataFilter && textWithoutFilters.length < 3) {
       setSearchResults([]);
       setSearchTotalMatches(0);
@@ -568,7 +641,7 @@ export default function App() {
       canceled = true;
       clearTimeout(timer);
     };
-  }, [searchScope, indexedSearchQuery]);
+  }, [searchScope, indexedSearchQuery, indexedRoots]);
 
   // Bootstrap app and load settings
   useEffect(() => {
@@ -1749,13 +1822,35 @@ export default function App() {
                   </div>
                 )}
 
+                {isAnyRootScanning && (
+                  <div
+                    className="scanning-banner"
+                    style={{
+                      padding: "8px 16px",
+                      background: "rgba(59, 130, 246, 0.12)",
+                      borderBottom: "1px solid rgba(59, 130, 246, 0.2)",
+                      fontSize: "0.85rem",
+                      color: "var(--accent-color, #3b82f6)",
+                      display: "flex",
+                      alignItems: "center",
+                      gap: "8px",
+                    }}
+                  >
+                    <span>🔄</span> Indexing in progress... Results update live as files are scanned.
+                  </div>
+                )}
+
                 {searchLoading && searchResults.length === 0 ? (
                   <div className="empty-state">
                     <p>Searching indexed files...</p>
                   </div>
                 ) : searchResults.length === 0 ? (
                   <div className="empty-state">
-                    <p>No results found for "{indexedSearchQuery}".</p>
+                    {isAnyRootScanning ? (
+                      <p>🔄 Indexing folder in progress... Matching files will appear as they are scanned.</p>
+                    ) : (
+                      <p>No results found for "{indexedSearchQuery}".</p>
+                    )}
                   </div>
                 ) : (
                   <div

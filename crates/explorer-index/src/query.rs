@@ -166,6 +166,25 @@ fn process_token(
             ));
         }
         *extension_filter = Some(clean_ext.to_string());
+    } else if let Some(ext) = lower.strip_prefix("*.") {
+        let clean_ext = ext.trim();
+        if clean_ext != "*" && !clean_ext.is_empty() && !clean_ext.contains('*') && !clean_ext.contains('?') {
+            *extension_filter = Some(clean_ext.to_string());
+        }
+    } else if lower.starts_with('.') && lower.len() > 1 {
+        let clean_ext = lower.trim_start_matches('.');
+        if !clean_ext.is_empty()
+            && !clean_ext.contains('.')
+            && !clean_ext.contains('/')
+            && !clean_ext.contains('\\')
+            && !clean_ext.contains('*')
+            && !clean_ext.contains('?')
+            && !clean_ext.contains(':')
+        {
+            *extension_filter = Some(clean_ext.to_string());
+        } else {
+            text_terms.push(lower);
+        }
     } else if let Some(k) = lower.strip_prefix("type:") {
         match k.trim() {
             "folder" | "dir" | "directory" => *kind_filter = Some(1),
@@ -184,6 +203,13 @@ fn process_token(
             format!("Unknown search filter '{token}'"),
             "parse_query",
         ));
+    } else if lower.starts_with('*') || lower.ends_with('*') {
+        let clean_term = lower.trim_matches('*');
+        if !clean_term.is_empty() && !clean_term.contains('*') && !clean_term.contains('?') {
+            text_terms.push(clean_term.to_string());
+        } else {
+            text_terms.push(lower);
+        }
     } else {
         text_terms.push(lower);
     }
@@ -263,8 +289,10 @@ impl QueryEngine {
         }
 
         if let Some(ref ext) = parsed.extension_filter {
-            sql.push_str("AND e.extension_norm = ? ");
+            let dot_ext = format!(".{ext}");
+            sql.push_str("AND (e.extension_norm = ? OR e.name_norm = ?) ");
             params_vec.push(rusqlite::types::Value::Text(ext.clone()));
+            params_vec.push(rusqlite::types::Value::Text(dot_ext));
         }
 
         // Apply short terms (< 3 chars) as instr predicates
@@ -495,5 +523,84 @@ mod tests {
         assert_eq!(res_pdf.total_matches, 2);
         assert_eq!(res_pdf.results[0].display_name, "invoice.pdf");
         assert_eq!(res_pdf.results[1].display_name, "my_invoice.pdf");
+    }
+
+    #[test]
+    fn test_search_extensions_and_wildcards() {
+        let db = Arc::new(IndexDb::open_in_memory().unwrap());
+        let root = db.add_root(&PathBuf::from(r"C:\test")).unwrap();
+
+        let entries = vec![
+            IndexEntryRecord {
+                root_id: root.id.clone(),
+                parent_id: None,
+                path: PathBuf::from(r"C:\test\rust-explorer.exe"),
+                name_display: "rust-explorer.exe".to_string(),
+                name_norm: "rust-explorer.exe".to_string(),
+                extension_norm: "exe".to_string(),
+                kind: 0,
+                size_bytes: Some(100),
+                modified_filetime: Some(1),
+                attributes: 32,
+                seen_epoch: 1,
+            },
+            IndexEntryRecord {
+                root_id: root.id.clone(),
+                parent_id: None,
+                path: PathBuf::from(r"C:\test\readme.txt"),
+                name_display: "readme.txt".to_string(),
+                name_norm: "readme.txt".to_string(),
+                extension_norm: "txt".to_string(),
+                kind: 0,
+                size_bytes: Some(200),
+                modified_filetime: Some(2),
+                attributes: 32,
+                seen_epoch: 1,
+            },
+            IndexEntryRecord {
+                root_id: root.id.clone(),
+                parent_id: None,
+                path: PathBuf::from(r"C:\test\main.c"),
+                name_display: "main.c".to_string(),
+                name_norm: "main.c".to_string(),
+                extension_norm: "c".to_string(),
+                kind: 0,
+                size_bytes: Some(50),
+                modified_filetime: Some(3),
+                attributes: 32,
+                seen_epoch: 1,
+            },
+        ];
+
+        db.batch_upsert_entries(&entries).unwrap();
+        let engine = QueryEngine::new(db);
+
+        let res_dot = engine.execute_search(".exe", None, 1, 10).unwrap();
+        assert_eq!(res_dot.total_matches, 1);
+        assert_eq!(res_dot.results[0].display_name, "rust-explorer.exe");
+
+        let res_plain = engine.execute_search("exe", None, 1, 10).unwrap();
+        assert_eq!(res_plain.total_matches, 1);
+        assert_eq!(res_plain.results[0].display_name, "rust-explorer.exe");
+
+        let res_star = engine.execute_search("*.exe", None, 1, 10).unwrap();
+        assert_eq!(res_star.total_matches, 1);
+        assert_eq!(res_star.results[0].display_name, "rust-explorer.exe");
+
+        let res_c = engine.execute_search(".c", None, 1, 10).unwrap();
+        assert_eq!(res_c.total_matches, 1);
+        assert_eq!(res_c.results[0].display_name, "main.c");
+
+        let res_star_c = engine.execute_search("*.c", None, 1, 10).unwrap();
+        assert_eq!(res_star_c.total_matches, 1);
+        assert_eq!(res_star_c.results[0].display_name, "main.c");
+
+        let res_combo = engine.execute_search("rust *.exe", None, 1, 10).unwrap();
+        assert_eq!(res_combo.total_matches, 1);
+        assert_eq!(res_combo.results[0].display_name, "rust-explorer.exe");
+
+        let res_wild = engine.execute_search("*explorer*", None, 1, 10).unwrap();
+        assert_eq!(res_wild.total_matches, 1);
+        assert_eq!(res_wild.results[0].display_name, "rust-explorer.exe");
     }
 }
