@@ -3,6 +3,7 @@ use explorer_domain::errors::{ErrorCode, ExplorerError};
 use explorer_win::path::wide_to_path;
 use rusqlite::params_from_iter;
 use serde::{Deserialize, Serialize};
+use std::os::windows::ffi::OsStrExt;
 use std::sync::Arc;
 use tracing::debug;
 
@@ -24,6 +25,7 @@ pub struct SearchResultItem {
     pub id: i64,
     pub root_id: String,
     pub path: String,
+    pub path_utf16: Vec<u16>,
     pub display_name: String,
     pub extension: String,
     pub kind: String, // "file" | "directory" | "reparse_point"
@@ -309,6 +311,7 @@ impl QueryEngine {
                     id,
                     root_id_col,
                     path_buf.to_string_lossy().to_string(),
+                    path_buf.as_os_str().encode_wide().collect::<Vec<_>>(),
                     name_display,
                     name_norm,
                     extension,
@@ -334,7 +337,7 @@ impl QueryEngine {
             .unwrap_or_default();
 
         let mut ranked = Vec::new();
-        for (id, rid, path, name, name_norm, ext, kind, size, mtime) in rows.flatten() {
+        for (id, rid, path, path_utf16, name, name_norm, ext, kind, size, mtime) in rows.flatten() {
             let score = if !primary_term.is_empty() && name_norm == primary_term {
                 1 // Exact match
             } else if !primary_term.is_empty() && name_norm.starts_with(&primary_term) {
@@ -349,6 +352,7 @@ impl QueryEngine {
                     id,
                     root_id: rid,
                     path,
+                    path_utf16,
                     display_name: name,
                     extension: ext,
                     kind,

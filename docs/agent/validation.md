@@ -1,7 +1,65 @@
 # Rust Explorer Validation Evidence Log
 
+> Milestone entries below are historical command records, not current acceptance evidence. Current status and objective-specific limitations are tracked in [objective-code-review-2026-10-04.md](objective-code-review-2026-10-04.md).
+
+## 2026-10-04 — Five-blocker closure (current)
+
+| Check | Result | Evidence / limits |
+|---|---|---|
+| cargo test --workspace --locked --offline -- --test-threads=1 --skip test_clipboard_roundtrip --nocapture | PASS, 51 tests | artifacts/reviews/gap-closure-2026-10-04/rust-tests.txt. One clipboard round-trip filtered; serial native fixture operations; synthetic stress tests are not physical performance acceptance. |
+| cargo test -p explorer-fs -p explorer-jobs -p explorer-store -p explorer-win -p rust-explorer --lib --locked --offline -- --test-threads=1 --skip test_clipboard_roundtrip --nocapture | PASS, 37 tests | targeted-final-tests.txt; final policy/rename changes, native error-vs-cancel regression and corrupt-state host initialization regression included. |
+| Follow-up policy/jobs, planner, path and native create/rename checks | PASS | After the 37-test run: 17 fs/jobs tests, 3 planner tests (identical-name rejection and case-only rename), 3 path tests (unpaired UTF-16 surrogate preservation), and 1 native executor create/rename fixture test passed. The first exact-name filter selected zero tests; rerunning with the correct filter executed the native test successfully. Final format and all-target Clippy passed. |
+| Rust format / Clippy all targets -D warnings | PASS | Locked/offline final check; all tests compile, including filtered clipboard round-trip. |
+| cargo xtask doctor | PASS | Toolchain checks and bundled FTS5/trigram test. |
+| npm run typecheck / test:unit / build:ui | PASS | TypeScript; 8 existing UI helper tests; Vite production bundle. These tests do not prove app interaction/accessibility acceptance. |
+| Native create / file-folder rename / copy / move / collision | PASS | Marked fixtures. Folder rename selects native Shell transfer provider with TSF_NORMAL; existing collision target and source preserved. IFileOperation folder rename initially failed 0x80070002; no unchecked filesystem fallback used. |
+| Native safe recycle refusal | PASS | Query support returns 0x80070005 before queuing DeleteItem; source intact, native error retained. Earlier permanent-delete offer declined. PreDelete no-recycle flag veto tested with injected callback. |
+| Successful recycling | CAPABILITY SKIP | Host volume support not verifiable; native success/recycle-only guarantee on supported filesystem remains OPEN. |
+| Clipboard owner | PARTIAL | Null owner rejected before clipboard open; valid main HWND routed/validated in code. Clipboard round-trip NOT RUN because complete format restoration harness is absent; user's clipboard untouched. |
+| Instance lease / disk journal | PASS | Separate probe processes denied while owner active, relaunch accepted after release, journal sentinel unchanged; disk journal reopen/recovery, unavailable path and corrupt state fail-closed cases passed. Actual UI focus and shutdown UX NOT RUN. |
+| Desktop/installer/real cloud/physical release benchmark | NOT RUN | No app host instance launched, no personal-file mutation or global shell-setting change. Cloud attribute cases tested without hydration; provider journey requires capability-specific fixtures. |
+
+Earlier failures are real and repaired: ancestor identity checks walked ACL-protected unrelated parents; extended Shell parsing and short-path aliases failed; positive DONT_PROCESS_CHILDREN was initially over-conservative; IFileOperation folder rename failed before callbacks. Final policy narrows canonical depth/native identity ancestry; Shell paths strip prefixes without UTF-16 loss; returned output gates that HRESULT's success; directory transfer provider succeeds and collision safety is tested. Early test harness/dev-dependency wiring errors were repaired. Failed native dialogs were declined/canceled, never counted as successful mutations.
+
+Full MVP/release acceptance remains OPEN; the five implementation blockers are closed without upgrading unverified gates to PASS.
+
 ## Format
 Every entry records: Date (UTC/Local), Milestone, Command executed, Build/Commit, Result (Pass/Fail/Skipped), Evidence summary.
+
+---
+
+### 2026-10-04 Objective Recheck — After Remediation
+
+HEAD: `fa934f0309a0e6930d163ade21d800b1fa2d5a4d` plus uncommitted remediation working tree. Review did not change production source.
+
+| Command | Result | Evidence / limit |
+|---|---|---|
+| `cargo fmt --all -- --check` | PASS | Workspace formatting. |
+| `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` | PASS | Rust compile/lint; all-targets does not execute tests. |
+| `npm run typecheck` | PASS | `tsc --noEmit`. |
+| `cargo test -p explorer-domain -p explorer-store --locked --offline` | PASS, 4 tests | IDs/errors and in-memory settings/journal lifecycle; no native mutations. |
+| `cargo test -p explorer-win path::tests --lib --locked --offline` | PASS, 3 tests | Native path helper cases only. |
+| `cargo test -p explorer-jobs test_name_validation --lib --locked --offline` | PASS, 1 test | Existing name validation cases; other planner/mutation tests excluded. |
+| `cargo test -p explorer-fs listing::tests --lib --locked --offline` | PASS, 2 tests | Synthetic natural sorting/folders first. |
+| `cargo test -p explorer-index query::tests --lib --locked --offline` | PASS, 2 tests | In-memory query parsing/ranking/filtering. |
+| `./artifacts/reviews/objective-recheck-2026-10-04/run-probe.ps1` | EXECUTED, 2 defects observed | Production sink maps USER_IGNORED to Succeeded and USER_CANCELLED to Failed. Surrogate prefix preserved, trailing-space name rejected, committed outcomes recovered, offline index retained. Probe uses in-memory data, no Shell transfer or clipboard. |
+| `git diff --check` | PASS | No whitespace errors. |
+| Native mutation/clipboard/app/installer/physical performance acceptance | NOT RUN | No competing executor launched; no personal files or clipboard touched; unmarked mutation harnesses excluded. Release gates remain open. |
+
+Probe source/output/runner: `artifacts/reviews/objective-recheck-2026-10-04/`. Initial standalone compile attempts failed due missing top-level domain rlib and mismatched feature graph; repaired by a unified dependency build. Final probe compiled and ran successfully; this is not a product build failure. Official Win32 documentation was checked for clipboard owner and Shell result-code contracts; source links are in the objective review.
+
+---
+
+### 2026-10-04 Objective Remediation — Earlier Validation
+
+| Date | Step | Command | Result | Evidence / Output |
+|---|---|---|---|---|
+| 2026-10-04 | Remediation | `cargo fmt --all -- --check` | PASS | Rust workspace formatting verified after the final changes. |
+| 2026-10-04 | Remediation | `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` | PASS | All workspace targets lint clean; this compiles targets but does not execute tests. |
+| 2026-10-04 | Remediation | `cargo check --workspace --locked --offline` | PASS | Workspace Rust code compiled, including callback journaling and interrupted-job outcome recovery. |
+| 2026-10-04 | Remediation | `npm run typecheck` | PASS | Desktop TypeScript compiled with `tsc --noEmit`. |
+| 2026-10-04 | Remediation | `git diff --check` | PASS | No whitespace errors; Git printed configured LF-to-CRLF normalization notices. |
+| 2026-10-04 | Remediation | Runtime tests, mutation harness, clipboard interaction, desktop launch, installer journey, physical 100k benchmark | NOT RUN | No mutation fixtures were executed; existing mutation harnesses do not yet meet the marked-root acceptance contract. No native/clean-machine or performance result is claimed. |
 
 ---
 
@@ -156,6 +214,3 @@ Every entry records: Date (UTC/Local), Milestone, Command executed, Build/Commit
 | 2026-10-04 | M8.2 | `npm run test:unit` | PASS | 8 unit tests in `App.test.tsx` passed, validating path breadcrumbs, case-insensitive filtering, recycle modal prompt formatting, and query constraints. |
 | 2026-10-04 | M8.3 | Release Staging & Verification | PASS | Computed SHA-256 hashes (`artifacts/release/SHA256SUMS.txt`), authored release metadata (`artifacts/release/BUILD_METADATA.json`), official release notes (`artifacts/release/RELEASE_NOTES.md`), and full Definition of Done evidence report (`artifacts/release/DEFINITION_OF_DONE_EVIDENCE.md`). |
 | 2026-10-04 | M8.3 | `.\scripts\check.ps1` | PASS | Fast verification suite passed 100% (format, clippy with `-D warnings`, 33 tests, TypeScript strict, 8 unit tests, UI build, doctor). |
-
-
-

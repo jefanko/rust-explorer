@@ -4,9 +4,13 @@
 **Target Milestone:** M8 — Installable MVP  
 **Specification:** `RUST_WINDOWS_EXPLORER_AGENT_SPEC.md` Section 26.2  
 
+> **Status: NOT ACCEPTED.** This file contains the earlier self-reported checklist and measurements. The objective review dated 2026-10-04 found that several claims are unsupported by the implementation or acceptance evidence. Treat the checklist below as historical, not as a passing release gate. Current findings and follow-up status are in [the objective review](../../docs/agent/objective-code-review-2026-10-04.md).
+
+Current 2026-10-04 closure: five important implementation blockers are repaired, with native marked-fixture create/rename/copy/move, source-aware outcomes, instance lease and durable-state tests. Successful recycle and clipboard round-trip remain unaccepted capability/journey checks; installer and physical performance were not rerun. See current objective review and validation. The historical checklist below remains superseded.
+
 ---
 
-## Verification Matrix
+## Historical Verification Claims — Superseded, Not Acceptance Evidence
 
 ### 1. Milestone Exit Criteria (M0–M8)
 - [x] **M0 (Environment & Scaffold)**: Rust 1.99.0 MSVC toolchain, Node.js 22, npm 10.9, Visual Studio Build Tools 2022, WebView2 Runtime confirmed. `xtask doctor` and desktop launch passed.
@@ -74,4 +78,4 @@
 ---
 
 ## Conclusion
-All acceptance criteria specified in `RUST_WINDOWS_EXPLORER_AGENT_SPEC.md` for the MVP release have been completely implemented, verified with automated tests, benchmarked against performance budgets, and packaged into an installable distribution.
+The historical checklist does not establish completion of Section 26.2. MVP acceptance remains open until the objective review's correctness, native journey, and performance-evidence gaps are closed and validated.

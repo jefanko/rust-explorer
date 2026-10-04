@@ -22,30 +22,59 @@ pub fn to_display_string(path: &Path) -> String {
 
 /// Strips `\\?\` and `\\?\UNC\` extended path prefixes for clean display.
 pub fn strip_extended_prefix(path: &Path) -> PathBuf {
-    let s = path.to_string_lossy();
-    if let Some(unc) = s.strip_prefix(r"\\?\UNC\") {
-        PathBuf::from(format!(r"\\{}", unc))
-    } else if let Some(drive) = s.strip_prefix(r"\\?\") {
-        PathBuf::from(drive)
+    let units: Vec<u16> = path.as_os_str().encode_wide().collect();
+    let unc: Vec<u16> = r"\\?\UNC\".encode_utf16().collect();
+    let prefix: Vec<u16> = r"\\?\".encode_utf16().collect();
+    if units.starts_with(&unc) {
+        let mut normal: Vec<u16> = r"\\".encode_utf16().collect();
+        normal.extend_from_slice(&units[unc.len()..]);
+        PathBuf::from(OsString::from_wide(&normal))
+    } else if units.starts_with(&prefix) {
+        PathBuf::from(OsString::from_wide(&units[prefix.len()..]))
     } else {
         path.to_path_buf()
     }
 }
 
+/// Shell parsing needs a normal filesystem path; retain every UTF-16 code unit.
+/// Exceptional component endings must never be silently normalized by the Shell.
+pub fn shell_path_to_wide(path: &Path) -> Result<Vec<u16>, ExplorerError> {
+    let path = strip_extended_prefix(path);
+    validate_safe_path(&path)?;
+    for component in path.components() {
+        if let Component::Normal(name) = component {
+            let units: Vec<u16> = name.encode_wide().collect();
+            if matches!(units.last(), Some(32 | 46)) {
+                return Err(ExplorerError::new(
+                    ErrorCode::UnsupportedPath,
+                    "Shell mutation does not support trailing spaces/dots in existing names",
+                    "shell_path_to_wide",
+                ));
+            }
+        }
+    }
+    Ok(path_to_wide(&path))
+}
+
 /// Appends `\\?\` or `\\?\UNC\` prefix if needed for paths exceeding MAX_PATH (260 characters).
 pub fn ensure_extended_prefix(path: &Path) -> PathBuf {
-    let path_str = path.to_string_lossy();
-    if path_str.starts_with(r"\\?\") {
+    let units: Vec<u16> = path.as_os_str().encode_wide().collect();
+    let starts_with = |prefix: &str| units.starts_with(&prefix.encode_utf16().collect::<Vec<_>>());
+    if starts_with(r"\\?\") {
         return path.to_path_buf();
     }
 
-    if let Some(unc_body) = path_str.strip_prefix(r"\\") {
+    let mut prefixed: Vec<u16>;
+    if starts_with(r"\\") {
         // UNC path: \\server\share -> \\?\UNC\server\share
-        PathBuf::from(format!(r"\\?\UNC\{}", unc_body))
+        prefixed = r"\\?\UNC\".encode_utf16().collect();
+        prefixed.extend_from_slice(&units[2..]);
     } else {
         // Normal absolute drive path: C:\foo -> \\?\C:\foo
-        PathBuf::from(format!(r"\\?\{}", path_str))
+        prefixed = r"\\?\".encode_utf16().collect();
+        prefixed.extend_from_slice(&units);
     }
+    PathBuf::from(OsString::from_wide(&prefixed))
 }
 
 /// Validates that a path is safe for navigation and mutation.
@@ -159,6 +188,15 @@ mod tests {
         );
         let stripped_unc = strip_extended_prefix(&extended_unc);
         assert_eq!(stripped_unc, unc);
+
+        let mut native: Vec<u16> = r"C:\fixture\".encode_utf16().collect();
+        native.push(0xD800); // Existing unpaired surrogate must retain its native identity.
+        native.extend(".txt".encode_utf16());
+        let exceptional = PathBuf::from(OsString::from_wide(&native));
+        let prefixed = ensure_extended_prefix(&exceptional);
+        assert_eq!(strip_extended_prefix(&prefixed), exceptional);
+        native.push(0);
+        assert_eq!(shell_path_to_wide(&prefixed).unwrap(), native);
     }
 
     #[test]

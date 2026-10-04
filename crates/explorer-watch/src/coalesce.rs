@@ -1,7 +1,9 @@
 use crate::adapter::RawWatchEvent;
 use crate::events::{WatchChange, WatchEventKind, WatchNotification};
 use std::collections::{HashMap, HashSet};
+use std::os::windows::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 use tokio::sync::broadcast;
@@ -57,6 +59,7 @@ impl DirAccumulator {
 pub struct EventCoalescer {
     watched_paths: Arc<RwLock<HashSet<PathBuf>>>,
     dirty_dirs: HashMap<PathBuf, DirAccumulator>,
+    overflow_all: Option<DirAccumulator>,
     out_tx: broadcast::Sender<WatchNotification>,
 }
 
@@ -68,12 +71,18 @@ impl EventCoalescer {
         Self {
             watched_paths,
             dirty_dirs: HashMap::new(),
+            overflow_all: None,
             out_tx,
         }
     }
 
     /// Process a single raw event into dirty directory state.
     pub fn ingest_event(&mut self, event: RawWatchEvent, now: Instant) {
+        if let Some(acc) = self.overflow_all.as_mut() {
+            acc.last_seen = now;
+            return;
+        }
+
         let watched = {
             let guard = self.watched_paths.read().unwrap();
             guard.clone()
@@ -82,13 +91,14 @@ impl EventCoalescer {
         if event.is_overflow || event.kind == WatchEventKind::Overflow {
             // If paths are specified, mark them overflow; otherwise mark all active watches
             if event.paths.is_empty() {
-                for dir in &watched {
-                    self.mark_dir_overflow(dir.clone(), now);
-                }
+                self.mark_all_overflow(now);
             } else {
                 for p in &event.paths {
                     if let Some(dir) = find_best_matching_root(p, &watched) {
                         self.mark_dir_overflow(dir, now);
+                        if self.overflow_all.is_some() {
+                            return;
+                        }
                     }
                 }
             }
@@ -99,11 +109,10 @@ impl EventCoalescer {
             if let Some(dir) = find_best_matching_root(&path, &watched) {
                 if self.dirty_dirs.len() >= MAX_DIRTY_DIRS && !self.dirty_dirs.contains_key(&dir) {
                     warn!(
-                        "Exceeded maximum dirty directories ({MAX_DIRTY_DIRS}); marking directory as overflow: {}",
-                        dir.display()
+                        "Exceeded maximum dirty directories ({MAX_DIRTY_DIRS}); scheduling full watched-path reconciliation"
                     );
-                    self.mark_dir_overflow(dir, now);
-                    continue;
+                    self.mark_all_overflow(now);
+                    return;
                 }
 
                 let entry = self
@@ -114,7 +123,8 @@ impl EventCoalescer {
                 if !entry.is_overflow {
                     entry.add_change(
                         WatchChange {
-                            path,
+                            path: path.clone(),
+                            path_utf16: path.as_os_str().encode_wide().collect(),
                             kind: event.kind,
                         },
                         now,
@@ -125,6 +135,10 @@ impl EventCoalescer {
     }
 
     fn mark_dir_overflow(&mut self, dir: PathBuf, now: Instant) {
+        if !self.dirty_dirs.contains_key(&dir) && self.dirty_dirs.len() >= MAX_DIRTY_DIRS {
+            self.mark_all_overflow(now);
+            return;
+        }
         let entry = self
             .dirty_dirs
             .entry(dir)
@@ -132,9 +146,21 @@ impl EventCoalescer {
         entry.mark_overflow(now);
     }
 
+    fn mark_all_overflow(&mut self, now: Instant) {
+        self.dirty_dirs.clear();
+        match self.overflow_all.as_mut() {
+            Some(acc) => acc.mark_overflow(now),
+            None => {
+                let mut acc = DirAccumulator::new(now);
+                acc.mark_overflow(now);
+                self.overflow_all = Some(acc);
+            }
+        }
+    }
+
     /// Check if any accumulated directory is ready to flush based on debounce duration.
     pub fn should_flush(&self, now: Instant) -> bool {
-        if self.dirty_dirs.is_empty() {
+        if self.dirty_dirs.is_empty() && self.overflow_all.is_none() {
             return false;
         }
 
@@ -142,6 +168,11 @@ impl EventCoalescer {
         // or if all dirty entries have been quiescent for DEBOUNCE_DURATION
         let mut any_quiescent = false;
         let mut any_exceeded_max = false;
+
+        if let Some(acc) = &self.overflow_all {
+            any_exceeded_max = now.duration_since(acc.first_seen) >= MAX_DEBOUNCE_WAIT;
+            any_quiescent = now.duration_since(acc.last_seen) >= DEBOUNCE_DURATION;
+        }
 
         for acc in self.dirty_dirs.values() {
             if now.duration_since(acc.first_seen) >= MAX_DEBOUNCE_WAIT {
@@ -159,6 +190,21 @@ impl EventCoalescer {
     /// Flushes quiescent or expired directories, returning generated notifications.
     pub fn flush_ready(&mut self, now: Instant) -> Vec<WatchNotification> {
         let mut flushed = Vec::new();
+        let flush_global = self.overflow_all.as_ref().is_some_and(|acc| {
+            now.duration_since(acc.last_seen) >= DEBOUNCE_DURATION
+                || now.duration_since(acc.first_seen) >= MAX_DEBOUNCE_WAIT
+        });
+        if flush_global {
+            self.overflow_all = None;
+            let watched = self.watched_paths.read().unwrap().clone();
+            for dir_path in watched {
+                let notif = make_notification(dir_path, true, Vec::new());
+                let _ = self.out_tx.send(notif.clone());
+                flushed.push(notif);
+            }
+            return flushed;
+        }
+
         let mut ready_keys = Vec::new();
 
         for (dir, acc) in &self.dirty_dirs {
@@ -172,11 +218,7 @@ impl EventCoalescer {
 
         for key in ready_keys {
             if let Some(acc) = self.dirty_dirs.remove(&key) {
-                let notif = WatchNotification {
-                    dir_path: key,
-                    is_overflow: acc.is_overflow,
-                    changes: acc.changes,
-                };
+                let notif = make_notification(key, acc.is_overflow, acc.changes);
                 let _ = self.out_tx.send(notif.clone());
                 flushed.push(notif);
             }
@@ -188,12 +230,16 @@ impl EventCoalescer {
     /// Flushes all dirty directories immediately regardless of timers.
     pub fn flush_all(&mut self) -> Vec<WatchNotification> {
         let mut flushed = Vec::new();
+        if self.overflow_all.take().is_some() {
+            let watched = self.watched_paths.read().unwrap().clone();
+            for dir_path in watched {
+                let notif = make_notification(dir_path, true, Vec::new());
+                let _ = self.out_tx.send(notif.clone());
+                flushed.push(notif);
+            }
+        }
         for (dir, acc) in self.dirty_dirs.drain() {
-            let notif = WatchNotification {
-                dir_path: dir,
-                is_overflow: acc.is_overflow,
-                changes: acc.changes,
-            };
+            let notif = make_notification(dir, acc.is_overflow, acc.changes);
             let _ = self.out_tx.send(notif.clone());
             flushed.push(notif);
         }
@@ -201,7 +247,11 @@ impl EventCoalescer {
     }
 
     /// Runs the async coalescer event loop consuming raw events from `rx`.
-    pub async fn run_loop(mut self, mut rx: Receiver<RawWatchEvent>) {
+    pub async fn run_loop(
+        mut self,
+        mut rx: Receiver<RawWatchEvent>,
+        overflow_signal: Arc<AtomicBool>,
+    ) {
         debug!("Starting event coalescer loop");
         let mut ticker = tokio::time::interval(Duration::from_millis(50));
 
@@ -221,12 +271,29 @@ impl EventCoalescer {
                 }
                 _ = ticker.tick() => {
                     let now = Instant::now();
+                    if overflow_signal.swap(false, Ordering::SeqCst) {
+                        self.mark_all_overflow(now);
+                    }
                     if self.should_flush(now) {
                         self.flush_ready(now);
                     }
                 }
             }
         }
+    }
+}
+
+fn make_notification(
+    dir_path: PathBuf,
+    is_overflow: bool,
+    changes: Vec<WatchChange>,
+) -> WatchNotification {
+    WatchNotification {
+        dir_path_display: dir_path.to_string_lossy().into_owned(),
+        dir_path_utf16: dir_path.as_os_str().encode_wide().collect(),
+        dir_path,
+        is_overflow,
+        changes,
     }
 }
 

@@ -37,6 +37,7 @@ impl WatchService {
         let reconciliation = Arc::new(ReconciliationManager::new());
 
         let adapter = NotifyAdapter::new(raw_tx.clone())?;
+        let overflow_signal = adapter.overflow_signal();
 
         let coalescer = EventCoalescer::new(watched_paths.clone(), notif_tx.clone());
 
@@ -55,7 +56,7 @@ impl WatchService {
                         return;
                     }
                 };
-                rt.block_on(coalescer.run_loop(raw_rx));
+                rt.block_on(coalescer.run_loop(raw_rx, overflow_signal));
             })
             .map_err(|e| {
                 ExplorerError::new(
@@ -236,20 +237,23 @@ impl WatchService {
 
 /// Normalizes watch path, stripping trailing backslashes/slashes.
 fn normalize_watch_path(path: &Path) -> PathBuf {
-    let s = path.to_string_lossy();
-    let trimmed = s.trim_end_matches(['\\', '/']);
-    if trimmed.is_empty() {
-        path.to_path_buf()
-    } else {
-        PathBuf::from(trimmed)
-    }
+    // `PathBuf` comparisons are component based; retaining it avoids reconstructing
+    // native UTF-16 names from a lossy display string.
+    path.to_path_buf()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::fs;
-    use tempfile::tempdir;
+    fn tempdir() -> std::io::Result<tempfile::TempDir> {
+        let root = tempfile::tempdir()?;
+        std::fs::write(
+            root.path().join(".rust-explorer-fixture-root"),
+            "watch fixture",
+        )?;
+        Ok(root)
+    }
 
     #[tokio::test]
     async fn test_watch_service_subscription_lifecycle_and_refcounts() {

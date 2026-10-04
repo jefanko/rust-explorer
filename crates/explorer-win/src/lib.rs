@@ -6,6 +6,7 @@ pub mod com;
 pub mod enumerate;
 pub mod handles;
 pub mod identity;
+pub mod instance;
 pub mod known_folders;
 pub mod path;
 pub mod shell;

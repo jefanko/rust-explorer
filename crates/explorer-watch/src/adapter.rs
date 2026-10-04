@@ -118,4 +118,10 @@ impl NotifyAdapter {
     pub fn check_and_clear_overflow(&self) -> bool {
         self.overflow_flag.swap(false, Ordering::SeqCst)
     }
+
+    /// Returns the shared overflow signal so the coalescer can reconcile even when
+    /// the bounded raw-event channel is too full to carry an overflow event.
+    pub fn overflow_signal(&self) -> Arc<AtomicBool> {
+        self.overflow_flag.clone()
+    }
 }

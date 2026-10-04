@@ -219,7 +219,8 @@ body {
   display: flex;
   align-items: center;
   gap: 6px;
-  width: 380px;
+  width: 480px;
+  max-width: 520px;
 }
 
 .search-scope-switcher {
@@ -239,6 +240,7 @@ body {
   color: var(--text-secondary);
   cursor: pointer;
   transition: all 0.15s ease;
+  white-space: nowrap;
 }
 
 .scope-btn:hover {
@@ -274,11 +276,38 @@ body {
   border-color: transparent;
 }
 
+.search-subfolders-quick-btn {
+  position: absolute;
+  right: 4px;
+  background-color: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+  border-radius: 3px;
+  padding: 2px 7px;
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--text-primary);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: all 0.15s ease;
+}
+
+.search-subfolders-quick-btn:hover {
+  background-color: var(--accent-color);
+  color: #ffffff;
+}
+
 .search-spinner {
   position: absolute;
   right: 6px;
   font-size: 11px;
   animation: spin 1s infinite linear;
+}
+
+.filter-empty-prompt {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
 }
 
 @keyframes spin {

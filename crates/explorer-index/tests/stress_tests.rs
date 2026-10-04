@@ -8,6 +8,11 @@ use tempfile::tempdir;
 #[test]
 fn test_100k_fts5_indexing_and_query_performance() {
     let dir = tempdir().unwrap();
+    std::fs::write(
+        dir.path().join(".rust-explorer-fixture-root"),
+        "synthetic index fixture",
+    )
+    .unwrap();
     let db_path = dir.path().join("stress_index.sqlite3");
 
     let db = Arc::new(IndexDb::open(&db_path).expect("open index db"));

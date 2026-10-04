@@ -5,7 +5,6 @@ import {
   DirectoryPage,
   NavigationResponse,
   AppSettings,
-  ClipboardPayload,
   JobSummary,
   OperationPlan,
   SortColumn,
@@ -22,6 +21,10 @@ export const client = {
 
   async navigate(path: string): Promise<NavigationResponse> {
     return invoke<NavigationResponse>("navigate", { path });
+  },
+
+  async navigateNativePath(pathUtf16: number[]): Promise<NavigationResponse> {
+    return invoke<NavigationResponse>("navigate_native_path", { pathUtf16 });
   },
 
   async listPage(
@@ -114,8 +117,8 @@ export const client = {
     });
   },
 
-  async commitPlan(plan: OperationPlan): Promise<JobSummary> {
-    return invoke<JobSummary>("commit_plan", { plan });
+  async commitPlan(planId: string): Promise<JobSummary> {
+    return invoke<JobSummary>("commit_plan", { planId });
   },
 
   async createFolder(
@@ -144,64 +147,28 @@ export const client = {
     return invoke<JobSummary[]>("list_jobs", { limit });
   },
 
-  async planCopy(
-    sources: string[],
-    destination: string
-  ): Promise<OperationPlan> {
-    return invoke<OperationPlan>("plan_copy", { sources, destination });
+  async planPaste(destinationFolderToken: string): Promise<OperationPlan | null> {
+    return invoke<OperationPlan | null>("plan_paste", { destinationFolderToken });
   },
 
-  async planMove(
-    sources: string[],
-    destination: string
-  ): Promise<OperationPlan> {
-    return invoke<OperationPlan>("plan_move", { sources, destination });
+  async planRecycle(folderToken: string, itemTokens: string[]): Promise<OperationPlan> {
+    return invoke<OperationPlan>("plan_recycle", { folderToken, itemTokens });
   },
 
-  async planRecycle(sources: string[]): Promise<OperationPlan> {
-    return invoke<OperationPlan>("plan_recycle", { sources });
+  async clipboardWriteItems(folderToken: string, itemTokens: string[], isCut: boolean): Promise<void> {
+    return invoke<void>("clipboard_write_items", { folderToken, itemTokens, isCut });
   },
 
-  async executeCopy(
-    sources: string[],
-    destination: string
-  ): Promise<JobSummary> {
-    return invoke<JobSummary>("execute_copy", { sources, destination });
+  async clipboardWritePath(pathUtf16: number[]): Promise<void> {
+    return invoke<void>("clipboard_write_path", { pathUtf16 });
   },
 
-  async executeMove(
-    sources: string[],
-    destination: string
-  ): Promise<JobSummary> {
-    return invoke<JobSummary>("execute_move", { sources, destination });
-  },
-
-  async executeRecycle(sources: string[]): Promise<JobSummary> {
-    return invoke<JobSummary>("execute_recycle", { sources });
-  },
-
-  async clipboardWrite(paths: string[], isCut: boolean): Promise<void> {
-    return invoke<void>("clipboard_write", { paths, isCut });
-  },
-
-  async clipboardRead(): Promise<ClipboardPayload | null> {
-    return invoke<ClipboardPayload | null>("clipboard_read");
-  },
-
-  async watchFolder(path: string, subscriberId: string): Promise<void> {
-    return invoke<void>("watch_folder", { path, subscriberId });
-  },
-
-  async unwatchFolder(path: string, subscriberId: string): Promise<void> {
-    return invoke<void>("unwatch_folder", { path, subscriberId });
+  async watchFolder(folderToken: string, subscriberId: string): Promise<void> {
+    return invoke<void>("watch_folder", { folderToken, subscriberId });
   },
 
   async unwatchAll(subscriberId: string): Promise<void> {
     return invoke<void>("unwatch_all", { subscriberId });
-  },
-
-  async getWatchStatus(path: string): Promise<boolean> {
-    return invoke<boolean>("get_watch_status", { path });
   },
 
   async onWatchNotification(
@@ -216,8 +183,8 @@ export const client = {
     return invoke<IndexedRoot[]>("list_indexed_roots");
   },
 
-  async addIndexedRoot(path: string): Promise<IndexedRoot> {
-    return invoke<IndexedRoot>("add_indexed_root", { path });
+  async addIndexedRoot(folderToken: string): Promise<IndexedRoot> {
+    return invoke<IndexedRoot>("add_indexed_root", { folderToken });
   },
 
   async removeIndexedRoot(rootId: string): Promise<void> {
@@ -242,9 +209,7 @@ export const client = {
     });
   },
 
-  async openPath(path: string): Promise<NavigationResponse | null> {
-    return invoke<NavigationResponse | null>("open_path", { path });
+  async openPath(pathUtf16: number[]): Promise<NavigationResponse | null> {
+    return invoke<NavigationResponse | null>("open_path", { pathUtf16 });
   },
 };
-
-

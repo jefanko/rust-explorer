@@ -2,6 +2,7 @@ use explorer_domain::errors::{ErrorCode, ExplorerError};
 use explorer_win::path::{path_to_wide, to_display_string, wide_to_path};
 use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
+use std::os::windows::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use tracing::{debug, info};
@@ -53,7 +54,9 @@ impl std::str::FromStr for RootState {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IndexedRoot {
     pub id: String,
+    #[serde(default, skip_serializing)]
     pub path: PathBuf,
+    pub path_utf16: Vec<u16>,
     pub display_path: String,
     pub state: RootState,
     pub completed_epoch: i64,
@@ -255,6 +258,7 @@ impl IndexDb {
         );
         Ok(IndexedRoot {
             id: root_id,
+            path_utf16: canonical.as_os_str().encode_wide().collect(),
             path: canonical,
             display_path: display_str,
             state,
@@ -288,6 +292,7 @@ impl IndexDb {
                 let path = wide_to_path(&bytes_to_wide(&path_bytes));
                 Ok(IndexedRoot {
                     id,
+                    path_utf16: path.as_os_str().encode_wide().collect(),
                     path,
                     display_path,
                     state: state_str.parse().unwrap_or(RootState::NotIndexed),
@@ -435,25 +440,104 @@ impl IndexDb {
         Ok(())
     }
 
-    /// Prune entries not seen during a completed scan epoch for a specific root.
-    pub fn prune_unseen_entries(
+    /// Prune stale direct children only after their parent directory was fully enumerated.
+    pub fn prune_unseen_children(
         &self,
         root_id: &str,
+        parent_path: &Path,
         current_epoch: i64,
     ) -> Result<usize, ExplorerError> {
-        let conn = self.conn.lock().unwrap();
-        let count = conn
-            .execute(
-                "DELETE FROM entries WHERE root_id = ?1 AND seen_epoch < ?2",
-                params![root_id, current_epoch],
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction().map_err(|e| {
+            ExplorerError::new(
+                ErrorCode::Internal,
+                format!("Failed to begin scoped prune: {e}"),
+                "IndexDb::prune_unseen_children",
             )
+        })?;
+
+        let stale_entries = {
+            let mut stmt = tx
+                .prepare(
+                    "SELECT id, path_utf16le, kind FROM entries WHERE root_id = ?1 AND seen_epoch < ?2",
+                )
+                .map_err(|e| {
+                    ExplorerError::new(
+                        ErrorCode::Internal,
+                        format!("Failed to query stale entries: {e}"),
+                        "IndexDb::prune_unseen_children",
+                    )
+                })?;
+            let rows = stmt
+                .query_map(params![root_id, current_epoch], |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, Vec<u8>>(1)?,
+                        row.get::<_, i32>(2)?,
+                    ))
+                })
+                .map_err(|e| {
+                    ExplorerError::new(
+                        ErrorCode::Internal,
+                        format!("Failed to enumerate stale entries: {e}"),
+                        "IndexDb::prune_unseen_children",
+                    )
+                })?;
+            rows.collect::<Result<Vec<_>, _>>().map_err(|e| {
+                ExplorerError::new(
+                    ErrorCode::Internal,
+                    format!("Failed to read stale entries: {e}"),
+                    "IndexDb::prune_unseen_children",
+                )
+            })?
+        };
+
+        let stale_directories: Vec<PathBuf> = stale_entries
+            .iter()
+            .filter_map(|(_, path_bytes, kind)| {
+                let path = wide_to_path(&bytes_to_wide(path_bytes));
+                (path.parent() == Some(parent_path) && *kind == 1).then_some(path)
+            })
+            .collect();
+        let stale_ids: Vec<i64> = stale_entries
+            .iter()
+            .filter_map(|(id, path_bytes, _)| {
+                let path = wide_to_path(&bytes_to_wide(path_bytes));
+                let is_direct_child = path.parent() == Some(parent_path);
+                let is_orphaned_descendant = stale_directories
+                    .iter()
+                    .any(|directory| path.starts_with(directory));
+                (is_direct_child || is_orphaned_descendant).then_some(*id)
+            })
+            .collect();
+
+        let mut delete_stmt = tx
+            .prepare("DELETE FROM entries WHERE id = ?1")
             .map_err(|e| {
                 ExplorerError::new(
                     ErrorCode::Internal,
-                    format!("Failed to prune unseen entries for root {root_id}: {e}"),
-                    "IndexDb::prune_unseen_entries",
+                    format!("Failed to prepare scoped prune: {e}"),
+                    "IndexDb::prune_unseen_children",
                 )
             })?;
+        let mut count = 0;
+        for id in stale_ids {
+            count += delete_stmt.execute(params![id]).map_err(|e| {
+                ExplorerError::new(
+                    ErrorCode::Internal,
+                    format!("Failed to delete stale entry: {e}"),
+                    "IndexDb::prune_unseen_children",
+                )
+            })?;
+        }
+        drop(delete_stmt);
+        tx.commit().map_err(|e| {
+            ExplorerError::new(
+                ErrorCode::Internal,
+                format!("Failed to commit scoped prune: {e}"),
+                "IndexDb::prune_unseen_children",
+            )
+        })?;
         Ok(count)
     }
 
@@ -464,13 +548,9 @@ impl IndexDb {
 }
 
 pub fn normalize_root_path(path: &Path) -> PathBuf {
-    let s = path.to_string_lossy();
-    let trimmed = s.trim_end_matches(['\\', '/']);
-    if trimmed.is_empty() {
-        path.to_path_buf()
-    } else {
-        PathBuf::from(trimmed)
-    }
+    // Keep the exact native Windows path units. In particular, lossy display
+    // conversion here can collapse distinct names containing unpaired surrogates.
+    path.to_path_buf()
 }
 
 pub fn wide_to_bytes(wide: &[u16]) -> Vec<u8> {

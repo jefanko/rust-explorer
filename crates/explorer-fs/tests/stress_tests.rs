@@ -29,6 +29,7 @@ fn generate_100k_entries(folder_token: &FolderToken) -> Vec<FileEntry> {
         entries.push(FileEntry {
             token: ItemToken::new(),
             parent_token: Some(folder_token.clone()),
+            native_name_utf16: display_name.encode_utf16().collect(),
             display_name,
             escaped_name_hint: None,
             kind,

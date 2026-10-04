@@ -2,8 +2,11 @@
 
 use explorer_domain::errors::{ErrorCode, ExplorerError};
 use explorer_domain::ids::{CommitToken, PlanId};
-use explorer_domain::operations::{OperationKind, OperationPlan};
+use explorer_domain::operations::{FileIdentity, OperationKind, OperationPlan};
+use explorer_fs::policy::MutationPolicy;
+use explorer_win::identity::get_file_identity;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::AtomicBool;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const FORBIDDEN_CHARS: &[char] = &['<', '>', ':', '"', '/', '\\', '|', '?', '*'];
@@ -14,8 +17,7 @@ const RESERVED_NAMES: &[&str] = &[
 
 /// Validates that a filename complies with Windows naming restrictions.
 pub fn validate_file_name(name: &str) -> Result<(), ExplorerError> {
-    let trimmed = name.trim();
-    if trimmed.is_empty() {
+    if name.is_empty() || name.trim().is_empty() {
         return Err(ExplorerError::new(
             ErrorCode::InvalidName,
             "File or folder name cannot be empty",
@@ -23,7 +25,7 @@ pub fn validate_file_name(name: &str) -> Result<(), ExplorerError> {
         ));
     }
 
-    if trimmed == "." || trimmed == ".." {
+    if name == "." || name == ".." {
         return Err(ExplorerError::new(
             ErrorCode::InvalidName,
             "Name cannot be '.' or '..'",
@@ -31,7 +33,7 @@ pub fn validate_file_name(name: &str) -> Result<(), ExplorerError> {
         ));
     }
 
-    if trimmed.ends_with('.') || trimmed.ends_with(' ') {
+    if name.ends_with('.') || name.ends_with(' ') {
         return Err(ExplorerError::new(
             ErrorCode::InvalidName,
             "Name cannot end with a period or space",
@@ -39,7 +41,7 @@ pub fn validate_file_name(name: &str) -> Result<(), ExplorerError> {
         ));
     }
 
-    if trimmed.len() > 255 {
+    if name.encode_utf16().count() > 255 {
         return Err(ExplorerError::new(
             ErrorCode::InvalidName,
             "Name exceeds maximum component limit of 255 characters",
@@ -47,7 +49,7 @@ pub fn validate_file_name(name: &str) -> Result<(), ExplorerError> {
         ));
     }
 
-    for c in trimmed.chars() {
+    for c in name.chars() {
         if FORBIDDEN_CHARS.contains(&c) || (c as u32) < 32 {
             return Err(ExplorerError::new(
                 ErrorCode::InvalidName,
@@ -58,12 +60,12 @@ pub fn validate_file_name(name: &str) -> Result<(), ExplorerError> {
     }
 
     // Check reserved names (e.g. "CON", "aux.txt")
-    let base_stem = trimmed.split('.').next().unwrap_or(trimmed);
+    let base_stem = name.split('.').next().unwrap_or(name);
     for &reserved in RESERVED_NAMES {
         if base_stem.eq_ignore_ascii_case(reserved) {
             return Err(ExplorerError::new(
                 ErrorCode::InvalidName,
-                format!("'{trimmed}' is a reserved Windows device name"),
+                format!("'{name}' is a reserved Windows device name"),
                 "validate_file_name",
             ));
         }
@@ -85,7 +87,27 @@ pub fn plan_create_folder(
         ));
     }
 
+    MutationPolicy::for_application()?.prepare(
+        OperationKind::CreateFolder,
+        &[],
+        Some(parent),
+        &AtomicBool::new(false),
+    )?;
+    let native_parent = parent.canonicalize().map_err(|e| {
+        ExplorerError::new(
+            ErrorCode::UnsupportedPath,
+            e.to_string(),
+            "plan_create_folder",
+        )
+    })?;
+    let parent = native_parent.as_path();
     validate_file_name(folder_name)?;
+    MutationPolicy::for_application()?.prepare(
+        OperationKind::CreateFolder,
+        &[],
+        Some(parent),
+        &AtomicBool::new(false),
+    )?;
 
     let target_path = parent.join(folder_name);
     if target_path.exists() {
@@ -107,6 +129,9 @@ pub fn plan_create_folder(
         kind: OperationKind::CreateFolder,
         source_paths: Vec::new(),
         destination_path: Some(parent.to_path_buf()),
+        source_identities: Vec::new(),
+        source_parent_identities: Vec::new(),
+        destination_identity: Some(get_file_identity(parent)?),
         target_name: Some(folder_name.to_string()),
         items_count: 1,
         expires_at: now + 300, // 5 minutes validity
@@ -123,12 +148,41 @@ pub fn plan_rename(source: &Path, new_name: &str) -> Result<OperationPlan, Explo
         ));
     }
 
+    // Policy must inspect the original ancestors before resolution hides links.
+    MutationPolicy::for_application()?.prepare(
+        OperationKind::Rename,
+        &[source.to_path_buf()],
+        source.parent(),
+        &AtomicBool::new(false),
+    )?;
+    let native_source = source.canonicalize().map_err(|e| {
+        ExplorerError::new(ErrorCode::UnsupportedPath, e.to_string(), "plan_rename")
+    })?;
+    let source = native_source.as_path();
     validate_file_name(new_name)?;
 
     let parent = source.parent().unwrap_or(source);
+    MutationPolicy::for_application()?.prepare(
+        OperationKind::Rename,
+        &[source.to_path_buf()],
+        Some(parent),
+        &AtomicBool::new(false),
+    )?;
     let target_path = parent.join(new_name);
-
-    if target_path.exists() && target_path != source {
+    if source.file_name().is_some_and(|name| name == new_name) {
+        return Err(ExplorerError::new(
+            ErrorCode::AlreadyExists,
+            "Rename source and destination are identical",
+            "plan_rename",
+        ));
+    }
+    // Allow a case-only rename of the same entry; distinct entries/hard links still conflict.
+    if target_path.exists()
+        && target_path
+            .canonicalize()
+            .map_err(|e| ExplorerError::new(ErrorCode::StaleItem, e.to_string(), "plan_rename"))?
+            != source
+    {
         return Err(ExplorerError::new(
             ErrorCode::AlreadyExists,
             format!("An item named '{new_name}' already exists in this folder"),
@@ -147,236 +201,87 @@ pub fn plan_rename(source: &Path, new_name: &str) -> Result<OperationPlan, Explo
         kind: OperationKind::Rename,
         source_paths: vec![source.to_path_buf()],
         destination_path: Some(parent.to_path_buf()),
+        source_identities: vec![get_file_identity(source)?],
+        source_parent_identities: vec![get_file_identity(parent)?],
+        destination_identity: Some(get_file_identity(parent)?),
         target_name: Some(new_name.to_string()),
         items_count: 1,
         expires_at: now + 300,
     })
 }
 
-/// Creates a validated, immutable plan for copying files/folders to a destination directory.
+/// Create conservative, metadata-preflighted transfer plans.
 pub fn plan_copy(sources: &[PathBuf], destination: &Path) -> Result<OperationPlan, ExplorerError> {
-    if sources.is_empty() {
-        return Err(ExplorerError::new(
-            ErrorCode::UnsupportedPath,
-            "Cannot plan copy with empty source list",
-            "plan_copy",
-        ));
-    }
-    if sources.len() > 10_000 {
-        return Err(ExplorerError::new(
-            ErrorCode::UnsupportedPath,
-            "Cannot plan copy exceeding 10,000 items",
-            "plan_copy",
-        ));
-    }
-    if !destination.is_dir() {
-        return Err(ExplorerError::new(
-            ErrorCode::NotFound,
-            format!(
-                "Destination directory does not exist: {}",
-                destination.display()
-            ),
-            "plan_copy",
-        ));
-    }
-
-    // Deduplicate and filter sources
-    let mut deduped = Vec::new();
-    for s in sources {
-        if !s.exists() {
-            return Err(ExplorerError::new(
-                ErrorCode::NotFound,
-                format!("Source item does not exist: {}", s.display()),
-                "plan_copy",
-            ));
-        }
-        if !deduped.contains(s) {
-            deduped.push(s.clone());
-        }
-    }
-
-    // Destination cannot be inside any source folder
-    for s in &deduped {
-        if s.is_dir() && destination.starts_with(s) {
-            return Err(ExplorerError::new(
-                ErrorCode::UnsupportedPath,
-                format!("Destination is inside source folder: {}", s.display()),
-                "plan_copy",
-            ));
-        }
-    }
-
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-
-    Ok(OperationPlan {
-        id: PlanId::new(),
-        commit_token: CommitToken::new(),
-        kind: OperationKind::Copy,
-        source_paths: deduped.clone(),
-        destination_path: Some(destination.to_path_buf()),
-        target_name: None,
-        items_count: deduped.len(),
-        expires_at: now + 300,
-    })
+    plan_transfer(OperationKind::Copy, sources, Some(destination))
 }
-
-/// Creates a validated, immutable plan for moving files/folders to a destination directory.
 pub fn plan_move(sources: &[PathBuf], destination: &Path) -> Result<OperationPlan, ExplorerError> {
-    if sources.is_empty() {
+    plan_transfer(OperationKind::Move, sources, Some(destination))
+}
+pub fn plan_recycle(sources: &[PathBuf]) -> Result<OperationPlan, ExplorerError> {
+    plan_transfer(OperationKind::Recycle, sources, None)
+}
+fn plan_transfer(
+    kind: OperationKind,
+    sources: &[PathBuf],
+    destination: Option<&Path>,
+) -> Result<OperationPlan, ExplorerError> {
+    if sources.is_empty() || sources.len() > 10_000 {
         return Err(ExplorerError::new(
             ErrorCode::UnsupportedPath,
-            "Cannot plan move with empty source list",
-            "plan_move",
+            "Select between 1 and 10,000 entries; split oversized operations",
+            "plan_transfer",
         ));
     }
-    if sources.len() > 10_000 {
-        return Err(ExplorerError::new(
-            ErrorCode::UnsupportedPath,
-            "Cannot plan move exceeding 10,000 items",
-            "plan_move",
-        ));
-    }
-    if !destination.is_dir() {
+    if destination.is_some_and(|p| !p.is_dir()) {
         return Err(ExplorerError::new(
             ErrorCode::NotFound,
-            format!(
-                "Destination directory does not exist: {}",
-                destination.display()
-            ),
-            "plan_move",
+            "Destination directory is unavailable",
+            "plan_transfer",
         ));
     }
-
-    let mut deduped = Vec::new();
-    for s in sources {
-        if !s.exists() {
-            return Err(ExplorerError::new(
-                ErrorCode::NotFound,
-                format!("Source item does not exist: {}", s.display()),
-                "plan_move",
-            ));
-        }
-        // Moving an item to its own parent directory is a no-op
-        if s.parent() == Some(destination) {
-            return Err(ExplorerError::new(
-                ErrorCode::AlreadyExists,
-                format!(
-                    "Source item is already in destination folder: {}",
-                    s.display()
-                ),
-                "plan_move",
-            ));
-        }
-        if !deduped.contains(s) {
-            deduped.push(s.clone());
-        }
-    }
-
-    // Destination cannot be inside any source folder
-    for s in &deduped {
-        if s.is_dir() && destination.starts_with(s) {
-            return Err(ExplorerError::new(
-                ErrorCode::UnsupportedPath,
-                format!(
-                    "Cannot move a folder into itself or its child: {}",
-                    s.display()
-                ),
-                "plan_move",
-            ));
-        }
-    }
-
+    let sources = MutationPolicy::for_application()?.prepare(
+        kind,
+        sources,
+        destination,
+        &AtomicBool::new(false),
+    )?;
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
-
     Ok(OperationPlan {
         id: PlanId::new(),
         commit_token: CommitToken::new(),
-        kind: OperationKind::Move,
-        source_paths: deduped.clone(),
-        destination_path: Some(destination.to_path_buf()),
+        kind,
+        source_identities: capture_identities(&sources)?,
+        source_parent_identities: sources
+            .iter()
+            .map(|p| get_file_identity(p.parent().expect("preflight excludes roots")))
+            .collect::<Result<_, _>>()?,
+        destination_path: destination.map(Path::to_path_buf),
+        destination_identity: destination.map(get_file_identity).transpose()?,
+        items_count: sources.len(),
+        source_paths: sources,
         target_name: None,
-        items_count: deduped.len(),
         expires_at: now + 300,
     })
 }
 
-/// Creates a validated, immutable plan for recycling files/folders.
-pub fn plan_recycle(sources: &[PathBuf]) -> Result<OperationPlan, ExplorerError> {
-    if sources.is_empty() {
-        return Err(ExplorerError::new(
-            ErrorCode::UnsupportedPath,
-            "Cannot plan recycle with empty source list",
-            "plan_recycle",
-        ));
-    }
-    if sources.len() > 10_000 {
-        return Err(ExplorerError::new(
-            ErrorCode::UnsupportedPath,
-            "Cannot plan recycle exceeding 10,000 items",
-            "plan_recycle",
-        ));
-    }
-
-    let mut deduped = Vec::new();
-    for s in sources {
-        if !s.exists() {
-            return Err(ExplorerError::new(
-                ErrorCode::NotFound,
-                format!("Item to recycle does not exist: {}", s.display()),
-                "plan_recycle",
-            ));
-        }
-        // Protect drive roots (e.g. C:\)
-        if s.parent().is_none() || s.to_string_lossy().len() <= 3 {
-            return Err(ExplorerError::new(
-                ErrorCode::UnsupportedPath,
-                format!("Cannot recycle root drive directory: {}", s.display()),
-                "plan_recycle",
-            ));
-        }
-        // Reject network UNC paths per Section 13.2 / Agent Contract
-        let s_str = s.to_string_lossy();
-        if s_str.starts_with(r"\\") || s_str.starts_with("//") {
-            return Err(ExplorerError::new(
-                ErrorCode::RecycleUnsupported,
-                format!(
-                    "Recycling is not supported for network/UNC path: {s_str}. Permanent deletion fallback is strictly forbidden."
-                ),
-                "plan_recycle",
-            ));
-        }
-        if !deduped.contains(s) {
-            deduped.push(s.clone());
-        }
-    }
-
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-
-    Ok(OperationPlan {
-        id: PlanId::new(),
-        commit_token: CommitToken::new(),
-        kind: OperationKind::Recycle,
-        source_paths: deduped.clone(),
-        destination_path: None,
-        target_name: None,
-        items_count: deduped.len(),
-        expires_at: now + 300,
-    })
+fn capture_identities(paths: &[PathBuf]) -> Result<Vec<FileIdentity>, ExplorerError> {
+    paths.iter().map(|path| get_file_identity(path)).collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::tempdir;
+    fn tempdir() -> std::io::Result<tempfile::TempDir> {
+        let dir = tempfile::tempdir()?;
+        std::fs::write(
+            dir.path().join(explorer_fs::policy::FIXTURE_MARKER),
+            "rust-explorer mutation fixture",
+        )?;
+        Ok(dir)
+    }
 
     #[test]
     fn test_name_validation() {
@@ -403,6 +308,8 @@ mod tests {
         // File creation
         let file_path = parent.join("test.txt");
         std::fs::write(&file_path, "hello").expect("write");
+        assert!(plan_rename(&file_path, "test.txt").is_err());
+        assert!(plan_rename(&file_path, "TEST.txt").is_ok());
 
         let rename_plan = plan_rename(&file_path, "renamed.txt").expect("plan rename");
         assert_eq!(rename_plan.kind, OperationKind::Rename);

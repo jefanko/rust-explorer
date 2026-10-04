@@ -16,7 +16,9 @@ pub enum WatchEventKind {
 /// A single file or subdirectory change record within a watched directory.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WatchChange {
+    #[serde(default, skip_serializing)]
     pub path: PathBuf,
+    pub path_utf16: Vec<u16>,
     pub kind: WatchEventKind,
 }
 
@@ -24,7 +26,10 @@ pub struct WatchChange {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WatchNotification {
     /// Watched directory root that was affected.
+    #[serde(default, skip_serializing)]
     pub dir_path: PathBuf,
+    pub dir_path_display: String,
+    pub dir_path_utf16: Vec<u16>,
     /// Whether the watcher encountered a buffer overflow or queue drop,
     /// requiring the consumer to perform a complete directory re-enumeration.
     pub is_overflow: bool,

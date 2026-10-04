@@ -10,9 +10,18 @@ use explorer_win::known_folders::{get_logical_drives, get_standard_known_folders
 use explorer_win::shell::{
     open_file_with_association, open_in_windows_explorer, show_file_properties,
 };
-use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use tauri::State;
+
+async fn run_blocking<T, F>(operation: &'static str, work: F) -> Result<T, ExplorerError>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T, ExplorerError> + Send + 'static,
+{
+    tokio::task::spawn_blocking(work)
+        .await
+        .map_err(|_| ExplorerError::new(ErrorCode::Internal, "Worker join failed", operation))?
+}
 
 #[tauri::command]
 pub async fn bootstrap(state: State<'_, AppState>) -> Result<BootstrapData, ExplorerError> {
@@ -57,6 +66,24 @@ pub async fn navigate(
     tokio::task::spawn_blocking(move || folder_svc.navigate(Path::new(&path)))
         .await
         .map_err(|_| ExplorerError::new(ErrorCode::Internal, "Worker join failed", "navigate"))?
+}
+
+#[tauri::command]
+pub async fn navigate_native_path(
+    path_utf16: Vec<u16>,
+    state: State<'_, AppState>,
+) -> Result<NavigationResponse, ExplorerError> {
+    let path = path_from_utf16(path_utf16, "navigate_native_path")?;
+    let folder_svc = state.folder_service.clone();
+    tokio::task::spawn_blocking(move || folder_svc.navigate(&path))
+        .await
+        .map_err(|_| {
+            ExplorerError::new(
+                ErrorCode::Internal,
+                "Worker join failed",
+                "navigate_native_path",
+            )
+        })?
 }
 
 #[tauri::command]
@@ -229,7 +256,11 @@ pub async fn plan_create_folder(
             )
         })?;
 
-    state.operation_service.plan_create_folder(&parent, &name)
+    let operation_service = state.operation_service.clone();
+    run_blocking("plan_create_folder", move || {
+        operation_service.plan_create_folder(&parent, &name)
+    })
+    .await
 }
 
 #[tauri::command]
@@ -246,15 +277,23 @@ pub async fn plan_rename(
             ExplorerError::new(ErrorCode::NotFound, "Item token not found", "plan_rename")
         })?;
 
-    state.operation_service.plan_rename(&source, &new_name)
+    let operation_service = state.operation_service.clone();
+    run_blocking("plan_rename", move || {
+        operation_service.plan_rename(&source, &new_name)
+    })
+    .await
 }
 
 #[tauri::command]
 pub async fn commit_plan(
-    plan: OperationPlan,
+    plan_id: explorer_domain::ids::PlanId,
     state: State<'_, AppState>,
 ) -> Result<JobSummary, ExplorerError> {
-    state.operation_service.commit_plan(&plan)
+    let operation_service = state.operation_service.clone();
+    run_blocking("commit_plan", move || {
+        operation_service.commit_plan(&plan_id)
+    })
+    .await
 }
 
 #[tauri::command]
@@ -274,9 +313,11 @@ pub async fn create_folder(
             )
         })?;
 
-    state
-        .operation_service
-        .execute_create_folder(&parent, &name)
+    let operation_service = state.operation_service.clone();
+    run_blocking("create_folder", move || {
+        operation_service.execute_create_folder(&parent, &name)
+    })
+    .await
 }
 
 #[tauri::command]
@@ -293,7 +334,11 @@ pub async fn rename_item(
             ExplorerError::new(ErrorCode::NotFound, "Item token not found", "rename_item")
         })?;
 
-    state.operation_service.execute_rename(&source, &new_name)
+    let operation_service = state.operation_service.clone();
+    run_blocking("rename_item", move || {
+        operation_service.execute_rename(&source, &new_name)
+    })
+    .await
 }
 
 #[tauri::command]
@@ -306,116 +351,142 @@ pub async fn list_jobs(
         .list_recent_jobs(limit.unwrap_or(20))
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ClipboardPayload {
-    pub paths: Vec<String>,
-    pub is_cut: bool,
-}
-
 #[tauri::command]
-pub async fn plan_copy(
-    sources: Vec<String>,
-    destination: String,
+pub async fn plan_paste(
+    destination_folder_token: FolderToken,
     state: State<'_, AppState>,
-) -> Result<OperationPlan, ExplorerError> {
-    let source_paths: Vec<PathBuf> = sources.into_iter().map(PathBuf::from).collect();
-    let dest_path = PathBuf::from(destination);
-    state.operation_service.plan_copy(&source_paths, &dest_path)
-}
-
-#[tauri::command]
-pub async fn plan_move(
-    sources: Vec<String>,
-    destination: String,
-    state: State<'_, AppState>,
-) -> Result<OperationPlan, ExplorerError> {
-    let source_paths: Vec<PathBuf> = sources.into_iter().map(PathBuf::from).collect();
-    let dest_path = PathBuf::from(destination);
-    state.operation_service.plan_move(&source_paths, &dest_path)
+) -> Result<Option<OperationPlan>, ExplorerError> {
+    let folder_service = state.folder_service.clone();
+    let operation_service = state.operation_service.clone();
+    run_blocking("plan_paste", move || {
+        let Some((source_paths, is_cut)) = explorer_win::clipboard::read_clipboard_hdrop()? else {
+            return Ok(None);
+        };
+        let destination = folder_service
+            .get_folder_path(&destination_folder_token)
+            .ok_or_else(|| {
+                ExplorerError::new(
+                    ErrorCode::StaleItem,
+                    "Destination folder token expired",
+                    "plan_paste",
+                )
+            })?;
+        let plan = if is_cut {
+            operation_service.plan_move(&source_paths, &destination)?
+        } else {
+            operation_service.plan_copy(&source_paths, &destination)?
+        };
+        Ok(Some(plan))
+    })
+    .await
 }
 
 #[tauri::command]
 pub async fn plan_recycle(
-    sources: Vec<String>,
+    folder_token: FolderToken,
+    item_tokens: Vec<ItemToken>,
     state: State<'_, AppState>,
 ) -> Result<OperationPlan, ExplorerError> {
-    let source_paths: Vec<PathBuf> = sources.into_iter().map(PathBuf::from).collect();
-    state.operation_service.plan_recycle(&source_paths)
+    let sources = item_tokens
+        .iter()
+        .map(|token| {
+            state
+                .folder_service
+                .resolve_item(&folder_token, token)
+                .ok_or_else(|| {
+                    ExplorerError::new(
+                        ErrorCode::StaleItem,
+                        "Selected item token expired",
+                        "plan_recycle",
+                    )
+                })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let operation_service = state.operation_service.clone();
+    run_blocking("plan_recycle", move || {
+        operation_service.plan_recycle(&sources)
+    })
+    .await
 }
 
 #[tauri::command]
-pub async fn execute_copy(
-    sources: Vec<String>,
-    destination: String,
+pub async fn clipboard_write_items(
+    window: tauri::Window,
+    folder_token: FolderToken,
+    item_tokens: Vec<ItemToken>,
+    is_cut: bool,
     state: State<'_, AppState>,
-) -> Result<JobSummary, ExplorerError> {
-    let source_paths: Vec<PathBuf> = sources.into_iter().map(PathBuf::from).collect();
-    let dest_path = PathBuf::from(destination);
-    state
-        .operation_service
-        .execute_copy(&source_paths, &dest_path)
+) -> Result<(), ExplorerError> {
+    let paths = item_tokens
+        .iter()
+        .map(|token| {
+            state
+                .folder_service
+                .resolve_item(&folder_token, token)
+                .ok_or_else(|| {
+                    ExplorerError::new(
+                        ErrorCode::StaleItem,
+                        "Selected item token expired",
+                        "clipboard_write_items",
+                    )
+                })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let owner = clipboard_owner(&window)?;
+    run_blocking("clipboard_write_items", move || {
+        explorer_win::clipboard::write_clipboard_hdrop(&paths, is_cut, owner)
+    })
+    .await
 }
 
 #[tauri::command]
-pub async fn execute_move(
-    sources: Vec<String>,
-    destination: String,
-    state: State<'_, AppState>,
-) -> Result<JobSummary, ExplorerError> {
-    let source_paths: Vec<PathBuf> = sources.into_iter().map(PathBuf::from).collect();
-    let dest_path = PathBuf::from(destination);
-    state
-        .operation_service
-        .execute_move(&source_paths, &dest_path)
+pub async fn clipboard_write_path(
+    window: tauri::Window,
+    path_utf16: Vec<u16>,
+) -> Result<(), ExplorerError> {
+    let owner = clipboard_owner(&window)?;
+    run_blocking("clipboard_write_path", move || {
+        explorer_win::clipboard::write_clipboard_text_utf16(&path_utf16, owner)
+    })
+    .await
 }
 
-#[tauri::command]
-pub async fn execute_recycle(
-    sources: Vec<String>,
-    state: State<'_, AppState>,
-) -> Result<JobSummary, ExplorerError> {
-    let source_paths: Vec<PathBuf> = sources.into_iter().map(PathBuf::from).collect();
-    state.operation_service.execute_recycle(&source_paths)
-}
-
-#[tauri::command]
-pub async fn clipboard_write(paths: Vec<String>, is_cut: bool) -> Result<(), ExplorerError> {
-    let path_bufs: Vec<PathBuf> = paths.into_iter().map(PathBuf::from).collect();
-    explorer_win::clipboard::write_clipboard_hdrop(&path_bufs, is_cut)
-}
-
-#[tauri::command]
-pub async fn clipboard_read() -> Result<Option<ClipboardPayload>, ExplorerError> {
-    let res = explorer_win::clipboard::read_clipboard_hdrop()?;
-    Ok(res.map(|(paths, is_cut)| ClipboardPayload {
-        paths: paths
-            .into_iter()
-            .map(|p| p.to_string_lossy().to_string())
-            .collect(),
-        is_cut,
-    }))
+fn clipboard_owner(window: &tauri::Window) -> Result<usize, ExplorerError> {
+    if window.label() != "main" {
+        return Err(ExplorerError::new(
+            ErrorCode::AccessDenied,
+            "Clipboard owner must be the authorized main window",
+            "clipboard_owner",
+        ));
+    }
+    window.hwnd().map(|hwnd| hwnd.0 as usize).map_err(|e| {
+        ExplorerError::new(
+            ErrorCode::Internal,
+            format!("Clipboard window is unavailable: {e}"),
+            "clipboard_owner",
+        )
+    })
 }
 
 #[tauri::command]
 pub async fn watch_folder(
     state: State<'_, AppState>,
-    path: String,
+    folder_token: FolderToken,
     subscriber_id: String,
 ) -> Result<(), ExplorerError> {
-    let p = PathBuf::from(&path);
+    let p = state
+        .folder_service
+        .get_folder_path(&folder_token)
+        .ok_or_else(|| {
+            ExplorerError::new(
+                ErrorCode::StaleItem,
+                "Folder token expired before watch registration",
+                "watch_folder",
+            )
+        })?;
     state
         .watch_service
         .subscribe(&p, explorer_watch::WatchMode::NonRecursive, &subscriber_id)
-}
-
-#[tauri::command]
-pub async fn unwatch_folder(
-    state: State<'_, AppState>,
-    path: String,
-    subscriber_id: String,
-) -> Result<(), ExplorerError> {
-    let p = PathBuf::from(&path);
-    state.watch_service.unsubscribe(&p, &subscriber_id)
 }
 
 #[tauri::command]
@@ -424,15 +495,6 @@ pub async fn unwatch_all(
     subscriber_id: String,
 ) -> Result<(), ExplorerError> {
     state.watch_service.unsubscribe_all(&subscriber_id)
-}
-
-#[tauri::command]
-pub async fn get_watch_status(
-    state: State<'_, AppState>,
-    path: String,
-) -> Result<bool, ExplorerError> {
-    let p = PathBuf::from(&path);
-    Ok(state.watch_service.is_degraded(&p))
 }
 
 #[tauri::command]
@@ -445,10 +507,39 @@ pub async fn list_indexed_roots(
 #[tauri::command]
 pub async fn add_indexed_root(
     state: State<'_, AppState>,
-    path: String,
+    folder_token: FolderToken,
 ) -> Result<explorer_index::IndexedRoot, ExplorerError> {
-    let p = PathBuf::from(&path);
-    state.index_service.add_root(&p)
+    let p = state
+        .folder_service
+        .get_folder_path(&folder_token)
+        .ok_or_else(|| {
+            ExplorerError::new(
+                ErrorCode::StaleItem,
+                "Folder token expired before indexing",
+                "add_indexed_root",
+            )
+        })?;
+    let index_service = state.index_service.clone();
+    let watch_service = state.watch_service.clone();
+    run_blocking("add_indexed_root", move || {
+        let root = index_service.register_root(&p)?;
+        let subscriber_id = format!("indexed-root:{}", root.id);
+        if let Err(error) = watch_service.subscribe(
+            &root.path,
+            explorer_watch::WatchMode::Recursive,
+            &subscriber_id,
+        ) {
+            let _ = index_service.remove_root(&root.id);
+            return Err(error);
+        }
+        if let Err(error) = index_service.recrawl_root(&root.id) {
+            let _ = watch_service.unsubscribe_all(&subscriber_id);
+            let _ = index_service.remove_root(&root.id);
+            return Err(error);
+        }
+        Ok(root)
+    })
+    .await
 }
 
 #[tauri::command]
@@ -456,7 +547,14 @@ pub async fn remove_indexed_root(
     state: State<'_, AppState>,
     root_id: String,
 ) -> Result<(), ExplorerError> {
-    state.index_service.remove_root(&root_id)
+    let index_service = state.index_service.clone();
+    let watch_service = state.watch_service.clone();
+    run_blocking("remove_indexed_root", move || {
+        let subscriber_id = format!("indexed-root:{root_id}");
+        watch_service.unsubscribe_all(&subscriber_id)?;
+        index_service.remove_root(&root_id)
+    })
+    .await
 }
 
 #[tauri::command]
@@ -464,7 +562,11 @@ pub async fn recrawl_indexed_root(
     state: State<'_, AppState>,
     root_id: String,
 ) -> Result<(), ExplorerError> {
-    state.index_service.recrawl_root(&root_id)
+    let index_service = state.index_service.clone();
+    run_blocking("recrawl_indexed_root", move || {
+        index_service.recrawl_root(&root_id)
+    })
+    .await
 }
 
 #[tauri::command]
@@ -482,14 +584,14 @@ pub async fn search_indexed(
 
 #[tauri::command]
 pub async fn open_path(
-    path: String,
+    path_utf16: Vec<u16>,
     state: State<'_, AppState>,
 ) -> Result<Option<NavigationResponse>, ExplorerError> {
-    let p = PathBuf::from(&path);
+    let p = path_from_utf16(path_utf16, "open_path")?;
     if !p.exists() {
         return Err(ExplorerError::new(
             ErrorCode::NotFound,
-            format!("Path does not exist: {path}"),
+            format!("Path does not exist: {}", p.display()),
             "open_path",
         ));
     }
@@ -509,4 +611,19 @@ pub async fn open_path(
             })??;
         Ok(None)
     }
+}
+
+fn path_from_utf16(
+    path_utf16: Vec<u16>,
+    operation: &'static str,
+) -> Result<PathBuf, ExplorerError> {
+    use std::os::windows::ffi::OsStringExt;
+    if path_utf16.is_empty() || path_utf16.contains(&0) {
+        return Err(ExplorerError::new(
+            ErrorCode::InvalidName,
+            "Native path is empty or contains an embedded NUL",
+            operation,
+        ));
+    }
+    Ok(PathBuf::from(std::ffi::OsString::from_wide(&path_utf16)))
 }

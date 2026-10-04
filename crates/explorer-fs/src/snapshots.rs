@@ -1,6 +1,8 @@
 use explorer_domain::ids::{FolderToken, ItemToken};
 use explorer_domain::models::{FileEntry, SortColumn, SortDirection};
 use std::collections::HashMap;
+use std::ffi::OsString;
+use std::os::windows::ffi::OsStringExt;
 use std::path::{Path, PathBuf};
 use std::sync::RwLock;
 use std::time::Instant;
@@ -26,7 +28,8 @@ impl FolderSnapshot {
     ) -> Self {
         let mut token_map = HashMap::with_capacity(entries.len());
         for entry in &entries {
-            let item_path = path.join(&entry.display_name);
+            let native_name = OsString::from_wide(&entry.native_name_utf16);
+            let item_path = path.join(native_name);
             token_map.insert(entry.token.clone(), item_path);
         }
 

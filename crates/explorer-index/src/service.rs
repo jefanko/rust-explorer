@@ -13,7 +13,8 @@ pub struct IndexService {
     db: Arc<IndexDb>,
     crawler: Arc<MetadataCrawler>,
     query_engine: Arc<QueryEngine>,
-    cancel_flags: Mutex<HashMap<String, Arc<AtomicBool>>>,
+    cancel_flags: Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>,
+    crawl_locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
 }
 
 impl IndexService {
@@ -27,7 +28,8 @@ impl IndexService {
             db,
             crawler,
             query_engine,
-            cancel_flags: Mutex::new(HashMap::new()),
+            cancel_flags: Arc::new(Mutex::new(HashMap::new())),
+            crawl_locks: Mutex::new(HashMap::new()),
         })
     }
 
@@ -41,7 +43,8 @@ impl IndexService {
             db,
             crawler,
             query_engine,
-            cancel_flags: Mutex::new(HashMap::new()),
+            cancel_flags: Arc::new(Mutex::new(HashMap::new())),
+            crawl_locks: Mutex::new(HashMap::new()),
         })
     }
 
@@ -50,11 +53,25 @@ impl IndexService {
         self.db.list_roots()
     }
 
+    /// Update persisted freshness after watcher registration or recovery fails.
+    pub fn update_root_state(
+        &self,
+        root_id: &str,
+        state: crate::db::RootState,
+    ) -> Result<(), ExplorerError> {
+        self.db.update_root_state(root_id, state)
+    }
+
     /// Register a new directory root for indexing and start the baseline metadata crawl.
     pub fn add_root(&self, path: &Path) -> Result<IndexedRoot, ExplorerError> {
-        let root = self.db.add_root(path)?;
+        let root = self.register_root(path)?;
         self.trigger_crawl(&root.id, &root.path);
         Ok(root)
+    }
+
+    /// Register a root without starting a crawl so the caller can establish its watcher first.
+    pub fn register_root(&self, path: &Path) -> Result<IndexedRoot, ExplorerError> {
+        self.db.add_root(path)
     }
 
     /// Remove an indexed root and cancel any active crawl.
@@ -101,22 +118,45 @@ impl IndexService {
         let cancel_flag = Arc::new(AtomicBool::new(false));
         {
             let mut flags = self.cancel_flags.lock().unwrap();
+            if let Some(previous) = flags.get(root_id) {
+                previous.store(true, Ordering::Relaxed);
+            }
             flags.insert(root_id.to_string(), cancel_flag.clone());
         }
+
+        let crawl_lock = {
+            let mut locks = self.crawl_locks.lock().unwrap();
+            locks
+                .entry(root_id.to_string())
+                .or_insert_with(|| Arc::new(Mutex::new(())))
+                .clone()
+        };
 
         let crawler = self.crawler.clone();
         let r_id = root_id.to_string();
         let r_path = root_path.to_path_buf();
+        let cancel_flags = self.cancel_flags.clone();
 
         std::thread::Builder::new()
             .name(format!("index-crawl-{}", &r_id[..8.min(r_id.len())]))
             .spawn(move || {
+                let _crawl_guard = crawl_lock.lock().unwrap();
+                if cancel_flag.load(Ordering::Relaxed) {
+                    return;
+                }
                 info!(
                     "Starting background metadata crawl for root {r_id} ({})",
                     r_path.display()
                 );
-                if let Err(e) = crawler.crawl_root(&r_id, &r_path, cancel_flag) {
+                if let Err(e) = crawler.crawl_root(&r_id, &r_path, cancel_flag.clone()) {
                     warn!("Background crawl failed for root {r_id}: {e}");
+                }
+                let mut flags = cancel_flags.lock().unwrap();
+                if flags
+                    .get(&r_id)
+                    .is_some_and(|active| Arc::ptr_eq(active, &cancel_flag))
+                {
+                    flags.remove(&r_id);
                 }
             })
             .expect("spawn crawl thread");
@@ -132,7 +172,14 @@ mod tests {
     #[test]
     fn test_index_service_add_search_remove() {
         let temp = tempdir().unwrap();
-        let root_dir = temp.path();
+        std::fs::write(
+            temp.path().join(".rust-explorer-fixture-root"),
+            "index fixture",
+        )
+        .unwrap();
+        let data_dir = temp.path().join("data");
+        std::fs::create_dir(&data_dir).unwrap();
+        let root_dir = data_dir.as_path();
 
         fs::write(root_dir.join("quarterly_results.xlsx"), "data").unwrap();
 

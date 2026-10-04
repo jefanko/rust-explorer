@@ -1,5 +1,23 @@
 # Rust Explorer Progress Log
 
+> Historical log: milestone labels and validation results below record earlier implementation reports. They are not current acceptance evidence. As of 2026-10-04, the MVP is **not accepted**; see [the objective review](objective-code-review-2026-10-04.md) for gaps and remediation.
+
+## Five-blocker closure — 2026-10-04
+
+- Closed protected/tree/reparse/placeholder preflight, parent identity and STA revalidation; preserved native Windows paths and distinct hard-link entries.
+- Corrected skipped/canceled/native-failure classification, source-based aggregation, actual outputs and journal rows for all operation kinds; UI surfaces non-success jobs immediately.
+- Clipboard writers use trusted main HWND. Startup requires absolute per-user state and durable journal/recovery; no memory fallback.
+- State lease precedes DB/recovery/executor and survives executor drain. Cross-process exclusion/relaunch proved; STA readiness/queue/pump/join added.
+- Native fixture operations pass. Directory rename uses no-overwrite Shell transfer provider to address verified IFileOperation host error; collision preservation proved. Recycling safely blocked on unverified fixture volume (native 0x80070005); successful recycle is capability-skipped, not accepted.
+- Workspace tests 51 passed (one clipboard round-trip filtered), final targeted 37 passed; Clippy/format/doctor/typecheck, 8 UI tests and UI build pass. Clipboard contents preserved; actual desktop/installer/physical release performance still unverified. See current review/validation/handoff.
+
+## Objective recheck — 2026-10-04
+
+- Reviewed the remediated production paths against the specification; no production source edits during this recheck.
+- Confirmed native-prefix/name/offline-index fixes and incremental outcome recovery with a production-library probe and in-memory data.
+- Confirmed incorrect skipped/canceled HRESULT classification; identified NULL-owner clipboard writer and silent in-memory journal fallback. Existing preflight and single-instance blockers remain.
+- Format/Clippy/typecheck and 12 non-mutating tests passed. Review, backlog, validation, and handoff record mutation acceptance as blocked; development may continue on browsing/search/UI.
+
 ## Milestone M0 — Environment, Scaffolding, and Baseline Desktop Host [COMPLETE]
 - Scaffolding, toolchain installation, and baseline desktop window setup complete.
 
@@ -282,9 +300,9 @@
 - Path & Mutation Sanitization: Native Win32 mutations enforce `validate_safe_path`, reject DOS reserved names and UNC recycle operations, and require validated `OperationPlan` with single-use `CommitToken`.
 - Guarded Recycle Bin: `ShellProgressSink` validates `TSF_DELETE_RECYCLE_IF_POSSIBLE` and aborts if recycling is unsupported, guaranteeing no silent fallback to permanent deletion.
 
-**Next Milestone**: Milestone M8 — Installable MVP (NSIS installer packaging, release documentation, clean-machine acceptance, and checksums).
+**Historical next-milestone note**: The M8 packaging work below was recorded, but clean-machine acceptance remains open.
 
-## Milestone M8 — Installable MVP [COMPLETE]
+## Milestone M8 — Installable MVP [PACKAGING RECORDED; ACCEPTANCE OPEN]
 
 ### Step 1: NSIS Per-User Installer Packaging
 - Configured Tauri Windows bundler in `apps/desktop/src-tauri/tauri.conf.json` with `"windows": { "nsis": { "installMode": "currentUser" } }`.
@@ -316,6 +334,4 @@
 - Updated `README.md` with complete installation, build, testing, benchmarking, troubleshooting, and supported limitation sections.
 - Fast verification suite `.\scripts\check.ps1` passed 100% (format, clippy with `-D warnings`, 33 tests, TypeScript strict, 8 unit tests, UI build, doctor).
 
-**Project Status**: All milestones (M0 through M8) are 100% COMPLETE! The Rust Explorer installable MVP is fully implemented, hardened, verified, and packaged for release.
-
-
+**Current Project Status (2026-10-04)**: MVP acceptance is **OPEN**. Some packaging and implementation work is present, but the audit findings, native journey, and performance/release evidence are not complete. The checks run during remediation were `cargo fmt --all`, `cargo check --workspace --locked --offline`, and `npm run typecheck`; tests and native acceptance were not run.

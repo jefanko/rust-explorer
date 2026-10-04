@@ -14,6 +14,8 @@ pub struct FileEntry {
     pub token: ItemToken,
     pub parent_token: Option<FolderToken>,
     pub display_name: String,
+    /// Exact native name code units, without a terminator. UI labels are not path authority.
+    pub native_name_utf16: Vec<u16>,
     pub escaped_name_hint: Option<String>,
     pub extension: String,
     pub kind: EntryKind,
@@ -82,6 +84,7 @@ pub struct BootstrapData {
 pub struct NavigationResponse {
     pub folder_token: FolderToken,
     pub path_display: String,
+    pub path_utf16: Vec<u16>,
     pub generation: u64,
     pub total_entries: usize,
 }

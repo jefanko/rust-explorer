@@ -13,6 +13,7 @@ use explorer_win::enumerate::enumerate_directory;
 use explorer_win::path::{to_display_string, validate_safe_path};
 use snapshots::FolderSnapshot;
 use std::collections::HashMap;
+use std::os::windows::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::sync::RwLock;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -23,6 +24,8 @@ pub struct FolderService {
     // Quick token-to-path mapping
     folder_paths: RwLock<HashMap<FolderToken, PathBuf>>,
 }
+
+const MAX_DIRECTORY_PAGE_SIZE: usize = 256;
 
 impl FolderService {
     pub fn new() -> Self {
@@ -82,12 +85,13 @@ impl FolderService {
             let mut paths = self.folder_paths.write().map_err(|_| {
                 ExplorerError::new(ErrorCode::Internal, "Lock poisoned", "navigate")
             })?;
-            paths.insert(folder_token.clone(), canonical);
+            paths.insert(folder_token.clone(), canonical.clone());
         }
 
         Ok(NavigationResponse {
             folder_token,
             path_display,
+            path_utf16: canonical.as_os_str().encode_wide().collect(),
             generation,
             total_entries,
         })
@@ -103,6 +107,7 @@ impl FolderService {
         sort_column: SortColumn,
         sort_direction: SortDirection,
     ) -> Result<DirectoryPage, ExplorerError> {
+        let limit = limit.clamp(1, MAX_DIRECTORY_PAGE_SIZE);
         let snaps = self
             .snapshots
             .read()
@@ -129,7 +134,7 @@ impl FolderService {
         }
 
         let (paged_entries, total) = snapshot.get_page(offset, limit, sort_column, sort_direction);
-        let end = (offset + limit).min(total);
+        let end = offset.saturating_add(limit).min(total);
 
         Ok(DirectoryPage {
             folder_token: folder_token.clone(),
@@ -176,7 +181,14 @@ mod tests {
     #[test]
     fn test_navigate_and_paginate() {
         let temp_dir = tempfile::tempdir().expect("tempdir");
-        let path = temp_dir.path();
+        std::fs::write(
+            temp_dir.path().join(".rust-explorer-fixture-root"),
+            "listing fixture",
+        )
+        .unwrap();
+        let data_dir = temp_dir.path().join("data");
+        std::fs::create_dir(&data_dir).unwrap();
+        let path = data_dir.as_path();
 
         File::create(path.join("file_a.txt")).unwrap();
         File::create(path.join("file_b.txt")).unwrap();

@@ -3,6 +3,7 @@ import { useVirtualizer } from "@tanstack/react-virtual";
 import { client } from "../bridge/client";
 import {
   DriveItem,
+  AppSettings,
   FileEntry,
   JobSummary,
   KnownFolderItem,
@@ -57,18 +58,28 @@ function getTabTitle(path: string): string {
   return parts.pop() || path || "PC";
 }
 
+function sameWindowsPath(left: number[], right: number[]): boolean {
+  if (left.length !== right.length) return false;
+  for (let index = 0; index < left.length; index += 1) {
+    const normalize = (unit: number) => (unit >= 65 && unit <= 90 ? unit + 32 : unit);
+    if (normalize(left[index]) !== normalize(right[index])) return false;
+  }
+  return true;
+}
+
 interface TabState {
   id: string;
   title: string;
   path: string;
   addressInput: string;
   folderToken: string;
+  nativePathUtf16: number[];
   generation: number;
   entries: FileEntry[];
   totalEntries: number;
   loading: boolean;
   error: string | null;
-  history: string[];
+  history: TabLocation[];
   historyIndex: number;
   sortColumn: SortColumn;
   sortDirection: SortDirection;
@@ -92,8 +103,13 @@ interface ModalState {
   value: string;
   folderToken: string;
   itemToken?: string;
-  targetPaths?: string[];
+  targetTokens?: string[];
   error?: string | null;
+}
+
+interface TabLocation {
+  pathDisplay: string;
+  pathUtf16: number[];
 }
 
 function createInitialTab(id = "tab_1", initialPath = ""): TabState {
@@ -103,12 +119,13 @@ function createInitialTab(id = "tab_1", initialPath = ""): TabState {
     path: initialPath,
     addressInput: initialPath,
     folderToken: "",
+    nativePathUtf16: [],
     generation: 0,
     entries: [],
     totalEntries: 0,
     loading: true,
     error: null,
-    history: initialPath ? [initialPath] : [],
+    history: initialPath ? [{ pathDisplay: initialPath, pathUtf16: [] }] : [],
     historyIndex: initialPath ? 0 : -1,
     sortColumn: "name",
     sortDirection: "ascending",
@@ -125,6 +142,8 @@ export default function App() {
   const [drives, setDrives] = useState<DriveItem[]>([]);
   const [favorites, setFavorites] = useState<string[]>([]);
   const [theme, setTheme] = useState<"system" | "light" | "dark">("system");
+  const [showHiddenFiles, setShowHiddenFiles] = useState<boolean>(false);
+  const settingsWriteQueue = useRef<Promise<void>>(Promise.resolve());
 
   // Multi-tab state
   const [tabs, setTabs] = useState<TabState[]>([createInitialTab()]);
@@ -160,6 +179,8 @@ export default function App() {
   // State refs to ensure listeners always see current values
   const tabsRef = useRef(tabs);
   tabsRef.current = tabs;
+  const navigationRequests = useRef(new Map<string, number>());
+  const directoryRequests = useRef(new Map<string, number>());
   const activeTabIndexRef = useRef(activeTabIndex);
   activeTabIndexRef.current = activeTabIndex;
 
@@ -167,12 +188,43 @@ export default function App() {
   const activeTabRef = useRef(activeTab);
   activeTabRef.current = activeTab;
 
+  function nextRequest(requests: Map<string, number>, tabId: string): number {
+    const requestId = (requests.get(tabId) || 0) + 1;
+    requests.set(tabId, requestId);
+    return requestId;
+  }
+
+  function persistSettings(
+    update:
+      | Partial<AppSettings>
+      | ((current: AppSettings) => Partial<AppSettings> | null)
+  ) {
+    const save = settingsWriteQueue.current.catch(() => undefined).then(async () => {
+      const current = await client.loadSettings();
+      const patch = typeof update === "function" ? update(current) : update;
+      if (patch) await client.saveSettings({ ...current, ...patch });
+    });
+    settingsWriteQueue.current = save;
+    return save;
+  }
+
   // Filtered entries for active tab
   const displayedEntries = useMemo(() => {
-    if (!activeTab.filterQuery.trim()) return activeTab.entries;
+    const visibleEntries = showHiddenFiles
+      ? activeTab.entries
+      : activeTab.entries.filter((entry) => !entry.is_hidden);
+    if (!activeTab.filterQuery.trim()) return visibleEntries;
     const q = activeTab.filterQuery.toLowerCase();
-    return activeTab.entries.filter((e) => e.display_name.toLowerCase().includes(q));
-  }, [activeTab.entries, activeTab.filterQuery]);
+    return visibleEntries.filter((e) => e.display_name.toLowerCase().includes(q));
+  }, [activeTab.entries, activeTab.filterQuery, showHiddenFiles]);
+
+  const visibleEntryCount = useMemo(
+    () =>
+      showHiddenFiles
+        ? activeTab.entries.length
+        : activeTab.entries.filter((entry) => !entry.is_hidden).length,
+    [activeTab.entries, showHiddenFiles]
+  );
 
   const rowVirtualizer = useVirtualizer({
     count: displayedEntries.length,
@@ -204,9 +256,18 @@ export default function App() {
       theme === "system" ? "light" : theme === "light" ? "dark" : "system";
     setTheme(nextTheme);
     applyTheme(nextTheme);
-    client.loadSettings().then((s) => {
-      client.saveSettings({ ...s, theme: nextTheme });
+    void persistSettings({ theme: nextTheme });
+  }
+
+  function toggleHiddenFiles() {
+    const next = !showHiddenFiles;
+    setShowHiddenFiles(next);
+    updateActiveTab({
+      selectedTokens: new Set(),
+      focusedIndex: -1,
+      anchorIndex: -1,
     });
+    void persistSettings({ show_hidden_files: next });
   }
 
   // Update a tab by ID
@@ -236,11 +297,43 @@ export default function App() {
     col = activeTabRef.current.sortColumn,
     dir = activeTabRef.current.sortDirection
   ) {
-    updateTab(tabId, { loading: true, error: null });
+    const requestId = nextRequest(directoryRequests.current, tabId);
+    updateTab(tabId, {
+      loading: true,
+      error: null,
+      entries: [],
+      totalEntries: 0,
+      selectedTokens: new Set(),
+      focusedIndex: -1,
+      anchorIndex: -1,
+    });
     try {
-      const page = await client.listPage(folderToken, generation, 0, 5000, col, dir);
+      const pageSize = 256;
+      let offset = 0;
+      const allEntries: FileEntry[] = [];
+      let publishedCount = 0;
+      let page: Awaited<ReturnType<typeof client.listPage>>;
+      do {
+        page = await client.listPage(folderToken, generation, offset, pageSize, col, dir);
+        if (directoryRequests.current.get(tabId) !== requestId) return;
+        allEntries.push(...page.entries);
+        offset += page.entries.length;
+        if (allEntries.length - publishedCount >= 1024 || page.is_last_page) {
+          const visibleEntries = allEntries.slice();
+          updateTab(tabId, {
+            entries: visibleEntries,
+            totalEntries: page.total_entries,
+          });
+          publishedCount = allEntries.length;
+        }
+        if (page.is_last_page || page.entries.length === 0) break;
+      } while (allEntries.length < page.total_entries);
+      if (directoryRequests.current.get(tabId) !== requestId) return;
+      if (!page.is_last_page && allEntries.length < page.total_entries) {
+        throw new Error("Directory page sequence ended before all entries were loaded");
+      }
       updateTab(tabId, {
-        entries: page.entries,
+        entries: allEntries,
         totalEntries: page.total_entries,
         selectedTokens: new Set(),
         focusedIndex: -1,
@@ -248,6 +341,7 @@ export default function App() {
         loading: false,
       });
     } catch (err: any) {
+      if (directoryRequests.current.get(tabId) !== requestId) return;
       updateTab(tabId, {
         error: err?.user_message || "Failed to load directory items",
         loading: false,
@@ -256,17 +350,25 @@ export default function App() {
   }
 
   // Navigate to path
-  async function navigateToPath(path: string, pushHistory = true, tabId?: string) {
-    if (!path.trim()) return;
+  async function navigateToPath(path: string | number[], pushHistory = true, tabId?: string) {
+    if (typeof path === "string" && !path.trim()) return;
     const targetTabId = tabId || activeTabRef.current.id;
+    const requestId = nextRequest(navigationRequests.current, targetTabId);
+    nextRequest(directoryRequests.current, targetTabId);
     updateTab(targetTabId, { loading: true, error: null });
 
     try {
-      const nav = await client.navigate(path);
+      const nav = Array.isArray(path)
+        ? await client.navigateNativePath(path)
+        : await client.navigate(path);
+      if (navigationRequests.current.get(targetTabId) !== requestId) return;
       updateTab(targetTabId, (prev) => {
         const nextIndex = pushHistory ? prev.historyIndex + 1 : prev.historyIndex;
         const newHist = pushHistory
-          ? [...prev.history.slice(0, nextIndex), nav.path_display]
+          ? [
+              ...prev.history.slice(0, nextIndex),
+              { pathDisplay: nav.path_display, pathUtf16: nav.path_utf16 },
+            ]
           : prev.history;
 
         return {
@@ -274,6 +376,7 @@ export default function App() {
           path: nav.path_display,
           addressInput: nav.path_display,
           folderToken: nav.folder_token,
+          nativePathUtf16: nav.path_utf16,
           generation: nav.generation,
           title: getTabTitle(nav.path_display),
           history: newHist,
@@ -283,17 +386,23 @@ export default function App() {
       });
 
       // Update watch subscriptions
-      const prevTab = tabsRef.current.find((t) => t.id === targetTabId);
-      const prevPath = prevTab?.path;
-      if (prevPath && prevPath.toLowerCase() !== nav.path_display.toLowerCase()) {
-        client.unwatchFolder(prevPath, targetTabId).catch(() => {});
+      try {
+        await client.unwatchAll(targetTabId);
+        if (navigationRequests.current.get(targetTabId) === requestId) {
+          await client.watchFolder(nav.folder_token, targetTabId);
+        }
+      } catch {
+        // Directory browsing remains available if watcher registration is degraded.
       }
-      client.watchFolder(nav.path_display, targetTabId).catch(() => {});
+      if (navigationRequests.current.get(targetTabId) !== requestId) return;
 
       await loadDirectory(nav.folder_token, nav.generation, targetTabId);
     } catch (err: any) {
+      if (navigationRequests.current.get(targetTabId) !== requestId) return;
       updateTab(targetTabId, {
-        error: err?.user_message || `Cannot access ${path}`,
+        error:
+          err?.user_message ||
+          `Cannot access ${typeof path === "string" ? path : "selected native path"}`,
         loading: false,
       });
     }
@@ -320,13 +429,40 @@ export default function App() {
   }
 
   async function handleIndexCurrentFolder() {
-    if (!activeTab.path) return;
+    if (!activeTab.folderToken) return;
     try {
-      await client.addIndexedRoot(activeTab.path);
+      await client.addIndexedRoot(activeTab.folderToken);
       await loadIndexedRoots();
     } catch (err: any) {
       alert(err?.user_message || err?.message || "Failed to index current folder");
     }
+  }
+
+  async function handleSearchSubfolders(overrideQuery?: string) {
+    const q = (overrideQuery ?? (searchScope === "folder" ? activeTab.filterQuery : indexedSearchQuery)).trim();
+    if (!q) return;
+
+    // Check if current folder or a parent folder is already covered by an indexed root
+    const normalizedActivePath = activeTab.path.toLowerCase().replace(/[\\/]+$/, "");
+    const matchingRoot = indexedRoots.find((r) => {
+      const rPath = r.display_path.toLowerCase().replace(/[\\/]+$/, "");
+      return normalizedActivePath === rPath || normalizedActivePath.startsWith(rPath + "\\");
+    });
+
+    if (!matchingRoot && activeTab.folderToken && indexedRoots.length < 8) {
+      try {
+        await client.addIndexedRoot(activeTab.folderToken);
+        await loadIndexedRoots();
+      } catch (err: any) {
+        console.warn("Could not auto-index root:", err);
+      }
+    }
+
+    setSearchScope("indexed");
+    setIndexedSearchQuery(q);
+    setTimeout(() => {
+      filterInputRef.current?.focus();
+    }, 50);
   }
 
   async function handleRemoveRoot(rootId: string) {
@@ -349,12 +485,12 @@ export default function App() {
 
   async function handleSearchResultDoubleClick(item: SearchResultItem) {
     if (item.kind === "directory") {
-      navigateToPath(item.path);
+      navigateToPath(item.path_utf16);
     } else {
       try {
-        const nav = await client.openPath(item.path);
+        const nav = await client.openPath(item.path_utf16);
         if (nav) {
-          navigateToPath(nav.path_display);
+          navigateToPath(item.path_utf16);
         }
       } catch (err: any) {
         alert(err?.user_message || err?.message || `Failed to open ${item.display_name}`);
@@ -445,6 +581,7 @@ export default function App() {
         setDrives(bootData.drives);
         setFavorites(settings.favorites || []);
         setTheme(settings.theme || "system");
+        setShowHiddenFiles(Boolean(settings.show_hidden_files));
         setJobs(jobList || []);
         setIndexedRoots(rootsList || []);
         applyTheme(settings.theme || "system");
@@ -479,11 +616,9 @@ export default function App() {
   useEffect(() => {
     const paths = tabs.map((t) => t.path).filter(Boolean);
     if (paths.length > 0) {
-      client.loadSettings().then((s) => {
-        if (s.restore_tabs) {
-          client.saveSettings({ ...s, saved_tabs: paths });
-        }
-      });
+      void persistSettings((settings) =>
+        settings.restore_tabs ? { saved_tabs: paths } : null
+      );
     }
   }, [tabs]);
 
@@ -493,10 +628,14 @@ export default function App() {
 
     client
       .onWatchNotification((notif) => {
-        const normNotif = notif.dir_path.replace(/[/\\]+$/, "").toLowerCase();
+        if (notif.is_overflow && notif.dir_path_utf16.length === 0) {
+          for (const tab of tabsRef.current) {
+            if (tab.folderToken) refresh(tab.id);
+          }
+          return;
+        }
         for (const tab of tabsRef.current) {
-          const normTab = tab.path.replace(/[/\\]+$/, "").toLowerCase();
-          if (normTab === normNotif) {
+          if (sameWindowsPath(tab.nativePathUtf16, notif.dir_path_utf16)) {
             refresh(tab.id);
           }
         }
@@ -576,7 +715,8 @@ export default function App() {
     if (cur.historyIndex > 0) {
       const prevIndex = cur.historyIndex - 1;
       updateActiveTab({ historyIndex: prevIndex });
-      navigateToPath(cur.history[prevIndex], false);
+      const target = cur.history[prevIndex];
+      navigateToPath(target.pathUtf16.length ? target.pathUtf16 : target.pathDisplay, false);
     }
   }
 
@@ -585,21 +725,20 @@ export default function App() {
     if (cur.historyIndex < cur.history.length - 1) {
       const nextIndex = cur.historyIndex + 1;
       updateActiveTab({ historyIndex: nextIndex });
-      navigateToPath(cur.history[nextIndex], false);
+      const target = cur.history[nextIndex];
+      navigateToPath(target.pathUtf16.length ? target.pathUtf16 : target.pathDisplay, false);
     }
   }
 
   function goUp() {
     const cur = activeTabRef.current;
-    if (!cur.path) return;
-    const trimmed = cur.path.replace(/\\$/, "");
-    const lastSlash = trimmed.lastIndexOf("\\");
-    if (lastSlash > 0) {
-      const parent = trimmed.substring(0, lastSlash + 1);
-      navigateToPath(parent);
-    } else if (lastSlash === 0) {
-      navigateToPath(trimmed + "\\");
-    }
+    const units = cur.nativePathUtf16;
+    if (units.length === 0) return;
+    const separator = Math.max(units.lastIndexOf(92), units.lastIndexOf(47));
+    if (separator < 0) return;
+    const isDriveRootSeparator = separator === 2 && units[1] === 58;
+    const parent = units.slice(0, separator + (isDriveRootSeparator ? 1 : 0));
+    if (parent.length > 0 && parent.length < units.length) navigateToPath(parent);
   }
 
   function refresh(targetTabId?: string | React.MouseEvent) {
@@ -608,17 +747,22 @@ export default function App() {
         ? tabsRef.current.find((t) => t.id === targetTabId) || activeTabRef.current
         : activeTabRef.current;
     if (!cur.folderToken) return;
+    const requestId = nextRequest(navigationRequests.current, cur.id);
+    nextRequest(directoryRequests.current, cur.id);
     updateTab(cur.id, { loading: true });
     client
       .refresh(cur.folderToken)
       .then((nav) => {
+        if (navigationRequests.current.get(cur.id) !== requestId) return;
         updateTab(cur.id, {
           folderToken: nav.folder_token,
+          nativePathUtf16: nav.path_utf16,
           generation: nav.generation,
         });
         return loadDirectory(nav.folder_token, nav.generation, cur.id);
       })
       .catch((err: any) => {
+        if (navigationRequests.current.get(cur.id) !== requestId) return;
         updateTab(cur.id, {
           error: err?.user_message || "Failed to refresh directory",
           loading: false,
@@ -641,28 +785,45 @@ export default function App() {
   async function handleItemDoubleClick(entry: FileEntry) {
     const cur = activeTabRef.current;
     if (!cur.folderToken) return;
+    const requestId = nextRequest(navigationRequests.current, cur.id);
+    nextRequest(directoryRequests.current, cur.id);
     try {
       const nav = await client.openItem(cur.folderToken, entry.token);
+      if (navigationRequests.current.get(cur.id) !== requestId) return;
       if (nav) {
-        updateActiveTab((prev) => {
+        updateTab(cur.id, (prev) => {
           const nextIndex = prev.historyIndex + 1;
-          const newHist = [...prev.history.slice(0, nextIndex), nav.path_display];
+          const newHist = [
+            ...prev.history.slice(0, nextIndex),
+            { pathDisplay: nav.path_display, pathUtf16: nav.path_utf16 },
+          ];
           return {
             ...prev,
             path: nav.path_display,
             addressInput: nav.path_display,
             folderToken: nav.folder_token,
+            nativePathUtf16: nav.path_utf16,
             generation: nav.generation,
             title: getTabTitle(nav.path_display),
             history: newHist,
             historyIndex: nextIndex,
-            filterQuery: "",
-          };
-        });
-        await loadDirectory(nav.folder_token, nav.generation, cur.id);
+          filterQuery: "",
+        };
+      });
+      try {
+        await client.unwatchAll(cur.id);
+        if (navigationRequests.current.get(cur.id) === requestId) {
+          await client.watchFolder(nav.folder_token, cur.id);
+        }
+      } catch {
+        // Keep navigation usable if watch registration is temporarily unavailable.
+      }
+      if (navigationRequests.current.get(cur.id) !== requestId) return;
+      await loadDirectory(nav.folder_token, nav.generation, cur.id);
       }
     } catch (err: any) {
-      updateActiveTab({
+      if (navigationRequests.current.get(cur.id) !== requestId) return;
+      updateTab(cur.id, {
         error: err?.user_message || "Failed to open item",
       });
     }
@@ -840,37 +1001,30 @@ export default function App() {
     );
     if (targetEntries.length === 0) return;
 
-    const paths = targetEntries.map((e) =>
-      activeTab.path
-        ? `${activeTab.path.replace(/[\\/]+$/, "")}\\${e.display_name}`
-        : e.display_name
-    );
-
     setContextMenu(null);
     setModal({
       type: "recycle",
       title:
-        paths.length === 1
+        targetEntries.length === 1
           ? `Recycle "${targetEntries[0].display_name}"?`
-          : `Recycle ${paths.length} items?`,
-      value: paths.length === 1 ? targetEntries[0].display_name : `${paths.length} items`,
+          : `Recycle ${targetEntries.length} items?`,
+      value:
+        targetEntries.length === 1
+          ? targetEntries[0].display_name
+          : `${targetEntries.length} items`,
       folderToken: activeTab.folderToken || "",
-      targetPaths: paths,
+      targetTokens: targetEntries.map((entry) => entry.token),
     });
   }
 
   async function handleCopy() {
     if (activeTab.selectedTokens.size === 0) return;
-    const paths = displayedEntries
+    const itemTokens = displayedEntries
       .filter((e) => activeTab.selectedTokens.has(e.token))
-      .map((e) =>
-        activeTab.path
-          ? `${activeTab.path.replace(/[\\/]+$/, "")}\\${e.display_name}`
-          : e.display_name
-      );
-    if (paths.length === 0) return;
+      .map((entry) => entry.token);
+    if (itemTokens.length === 0) return;
     try {
-      await client.clipboardWrite(paths, false);
+      await client.clipboardWriteItems(activeTab.folderToken, itemTokens, false);
     } catch (err: any) {
       console.error("Failed to copy:", err);
     }
@@ -878,31 +1032,28 @@ export default function App() {
 
   async function handleCut() {
     if (activeTab.selectedTokens.size === 0) return;
-    const paths = displayedEntries
+    const itemTokens = displayedEntries
       .filter((e) => activeTab.selectedTokens.has(e.token))
-      .map((e) =>
-        activeTab.path
-          ? `${activeTab.path.replace(/[\\/]+$/, "")}\\${e.display_name}`
-          : e.display_name
-      );
-    if (paths.length === 0) return;
+      .map((entry) => entry.token);
+    if (itemTokens.length === 0) return;
     try {
-      await client.clipboardWrite(paths, true);
+      await client.clipboardWriteItems(activeTab.folderToken, itemTokens, true);
     } catch (err: any) {
       console.error("Failed to cut:", err);
     }
   }
 
+  function showJobResult(job: JobSummary) {
+    setJobs((current) => [job, ...current.filter((existing) => existing.id !== job.id)]);
+    if (job.state !== "succeeded") setShowJobsDrawer(true);
+  }
+
   async function handlePaste() {
-    if (!activeTab.path) return;
+    if (!activeTab.folderToken) return;
     try {
-      const clip = await client.clipboardRead();
-      if (!clip || clip.paths.length === 0) return;
-      if (clip.is_cut) {
-        await client.executeMove(clip.paths, activeTab.path);
-      } else {
-        await client.executeCopy(clip.paths, activeTab.path);
-      }
+      const plan = await client.planPaste(activeTab.folderToken);
+      if (!plan) return;
+      showJobResult(await client.commitPlan(plan.id));
       refresh();
       refreshJobs();
     } catch (err: any) {
@@ -917,19 +1068,20 @@ export default function App() {
 
     try {
       if (modal.type === "recycle") {
-        if (modal.targetPaths && modal.targetPaths.length > 0) {
-          await client.executeRecycle(modal.targetPaths);
+        if (modal.targetTokens && modal.targetTokens.length > 0) {
+          const plan = await client.planRecycle(modal.folderToken, modal.targetTokens);
+          showJobResult(await client.commitPlan(plan.id));
         }
       } else {
-        const trimmed = modal.value.trim();
-        if (!trimmed) {
+        const name = modal.value;
+        if (!name.trim()) {
           setModal({ ...modal, error: "Name cannot be empty" });
           return;
         }
         if (modal.type === "create_folder") {
-          await client.createFolder(modal.folderToken, trimmed);
+          showJobResult(await client.createFolder(modal.folderToken, name));
         } else if (modal.type === "rename" && modal.itemToken) {
-          await client.renameItem(modal.folderToken, modal.itemToken, trimmed);
+          showJobResult(await client.renameItem(modal.folderToken, modal.itemToken, name));
         }
       }
       setModal(null);
@@ -1116,6 +1268,10 @@ export default function App() {
       // Delete -> Recycle selected items
       if (e.key === "Delete") {
         e.preventDefault();
+        if (e.shiftKey) {
+          alert("Permanent deletion is not supported. Use Recycle Bin instead.");
+          return;
+        }
         openRecycleModal();
         return;
       }
@@ -1347,20 +1503,23 @@ export default function App() {
                   setSearchScope("folder");
                   filterInputRef.current?.focus();
                 }}
-                title="Filter items in current folder"
+                title="Filter items in current folder only"
               >
-                Folder
+                Current Folder
               </button>
               <button
                 type="button"
                 className={`scope-btn ${searchScope === "indexed" ? "active" : ""}`}
                 onClick={() => {
                   setSearchScope("indexed");
+                  if (activeTab.filterQuery && !indexedSearchQuery) {
+                    setIndexedSearchQuery(activeTab.filterQuery);
+                  }
                   filterInputRef.current?.focus();
                 }}
-                title="Search indexed roots (SQLite FTS5)"
+                title="Search subfolders & indexed files (SQLite FTS5)"
               >
-                Indexed
+                Subfolders (Indexed)
               </button>
             </div>
             <div className="search-input-wrapper">
@@ -1370,8 +1529,8 @@ export default function App() {
                 className="search-input"
                 placeholder={
                   searchScope === "folder"
-                    ? "Filter current folder (Ctrl+F)"
-                    : "Search indexed (e.g. invoice ext:pdf)..."
+                    ? "Filter current folder (Press Enter to search subfolders)..."
+                    : "Search subfolders (e.g. invoice ext:pdf)..."
                 }
                 value={searchScope === "folder" ? activeTab.filterQuery : indexedSearchQuery}
                 onChange={(e) => {
@@ -1381,8 +1540,24 @@ export default function App() {
                     setIndexedSearchQuery(e.target.value);
                   }
                 }}
-                aria-label={searchScope === "folder" ? "Filter" : "Search"}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && searchScope === "folder" && activeTab.filterQuery.trim()) {
+                    e.preventDefault();
+                    handleSearchSubfolders();
+                  }
+                }}
+                aria-label={searchScope === "folder" ? "Filter current folder" : "Search subfolders"}
               />
+              {searchScope === "folder" && activeTab.filterQuery.trim().length >= 2 && (
+                <button
+                  type="button"
+                  className="search-subfolders-quick-btn"
+                  onClick={() => handleSearchSubfolders()}
+                  title="Search inside subfolders"
+                >
+                  🔍 Subfolders
+                </button>
+              )}
               {searchScope === "indexed" && searchLoading && (
                 <span className="search-spinner" title="Searching...">⏳</span>
               )}
@@ -1396,6 +1571,15 @@ export default function App() {
             aria-label="Toggle theme"
           >
             {theme === "system" ? "💻 Auto" : theme === "dark" ? "🌙 Dark" : "☀️ Light"}
+          </button>
+          <button
+            className="theme-toggle-btn"
+            onClick={toggleHiddenFiles}
+            title="Show or hide hidden files"
+            aria-label="Toggle hidden files"
+            aria-pressed={showHiddenFiles}
+          >
+            {showHiddenFiles ? "Hidden On" : "Hidden Off"}
           </button>
         </div>
       </header>
@@ -1484,7 +1668,7 @@ export default function App() {
               <button
                 className="sidebar-add-btn"
                 title="Index current folder"
-                disabled={indexedRoots.length >= 8 || !activeTab.path}
+                disabled={indexedRoots.length >= 8 || !activeTab.folderToken}
                 onClick={handleIndexCurrentFolder}
               >
                 +
@@ -1493,7 +1677,7 @@ export default function App() {
             {indexedRoots.length === 0 ? (
               <div className="sidebar-empty-note">
                 No indexed roots
-                {activeTab.path && (
+                {activeTab.folderToken && (
                   <button
                     className="btn-link"
                     onClick={handleIndexCurrentFolder}
@@ -1508,10 +1692,10 @@ export default function App() {
                   <li key={root.id} className="indexed-root-item">
                     <div
                       className="indexed-root-info"
-                      onClick={() => navigateToPath(root.path)}
+                      onClick={() => navigateToPath(root.path_utf16)}
                       title={`Path: ${root.display_path}\nState: ${root.state}\nEpoch: ${root.completed_epoch}`}
                     >
-                      <span className="root-name">{getTabTitle(root.path)}</span>
+                      <span className="root-name">{getTabTitle(root.display_path)}</span>
                       <span className={`root-badge badge-${root.state}`}>{root.state}</span>
                     </div>
                     <div className="root-actions">
@@ -1690,7 +1874,29 @@ export default function App() {
                   </div>
                 ) : displayedEntries.length === 0 ? (
                   <div className="empty-state">
-                    <p>This folder is empty.</p>
+                    {activeTab.filterQuery ? (
+                      <div className="filter-empty-prompt">
+                        <p>No items named "{activeTab.filterQuery}" found directly in this folder.</p>
+                        <button
+                          type="button"
+                          className="action-btn"
+                          style={{
+                            marginTop: "12px",
+                            padding: "8px 16px",
+                            fontSize: "13px",
+                            cursor: "pointer",
+                            fontWeight: 500,
+                          }}
+                          onClick={() => handleSearchSubfolders()}
+                        >
+                          🔍 Search inside subfolders for "{activeTab.filterQuery}"
+                        </button>
+                      </div>
+                    ) : !showHiddenFiles && activeTab.entries.some((entry) => entry.is_hidden) ? (
+                      <p>No visible items. Hidden files are turned off.</p>
+                    ) : (
+                      <p>This folder is empty.</p>
+                    )}
                   </div>
                 ) : (
                   <div
@@ -1699,6 +1905,10 @@ export default function App() {
                       width: "100%",
                       position: "relative",
                     }}
+                    role="listbox"
+                    aria-label={`Folder items in ${activeTab.path}`}
+                    aria-multiselectable="true"
+                    aria-busy={activeTab.loading}
                   >
                     {rowVirtualizer.getVirtualItems().map((virtualRow) => {
                       const entry = displayedEntries[virtualRow.index];
@@ -1708,6 +1918,14 @@ export default function App() {
                         <div
                           key={entry.token}
                           className={`file-row ${isSelected ? "selected" : ""}`}
+                          role="option"
+                          aria-selected={isSelected}
+                          tabIndex={
+                            activeTab.focusedIndex === virtualRow.index ||
+                            (activeTab.focusedIndex < 0 && virtualRow.index === 0)
+                              ? 0
+                              : -1
+                          }
                           onClick={(e) => handleRowClick(entry, virtualRow.index, e)}
                           onDoubleClick={() => handleItemDoubleClick(entry)}
                           onContextMenu={(e) => handleRowContextMenu(entry, e)}
@@ -1762,7 +1980,7 @@ export default function App() {
           ) : (
             <>
               {displayedEntries.length} {displayedEntries.length === 1 ? "item" : "items"}
-              {activeTab.filterQuery && ` (filtered from ${activeTab.totalEntries})`}
+              {activeTab.filterQuery && ` (filtered from ${visibleEntryCount})`}
               {activeTab.selectedTokens.size > 0 && ` | ${activeTab.selectedTokens.size} selected`}
             </>
           )}
@@ -1807,8 +2025,17 @@ export default function App() {
                 onClick={() => {
                   const item = contextMenu.searchResult!;
                   setContextMenu(null);
-                  const parentDir = item.path.replace(/\\[^\\]+$/, "");
-                  navigateToPath(parentDir);
+                  const separator = Math.max(
+                    item.path_utf16.lastIndexOf(92),
+                    item.path_utf16.lastIndexOf(47)
+                  );
+                  if (separator > 0) {
+                    const driveRootSeparator =
+                      separator === 2 && item.path_utf16[1] === 58;
+                    navigateToPath(
+                      item.path_utf16.slice(0, separator + (driveRootSeparator ? 1 : 0))
+                    );
+                  }
                 }}
               >
                 <span>Open containing folder</span>
@@ -1818,7 +2045,7 @@ export default function App() {
                 onClick={() => {
                   const item = contextMenu.searchResult!;
                   setContextMenu(null);
-                  client.clipboardWrite([item.path], false);
+                  client.clipboardWritePath(item.path_utf16);
                 }}
               >
                 <span>Copy path</span>
@@ -1991,9 +2218,9 @@ export default function App() {
                   <div style={{ fontSize: "14px", lineHeight: "1.5" }}>
                     Are you sure you want to send{" "}
                     <strong>
-                      {modal.targetPaths?.length === 1
+                      {modal.targetTokens?.length === 1
                         ? `"${modal.value}"`
-                        : `${modal.targetPaths?.length} items`}
+                        : `${modal.targetTokens?.length} items`}
                     </strong>{" "}
                     to the Recycle Bin?
                     <div style={{ marginTop: "8px", fontSize: "12px", color: "var(--text-muted)" }}>
@@ -2063,7 +2290,8 @@ export default function App() {
                   </div>
                   <div className="job-card-details">
                     <span>
-                      {job.completed_items}/{job.total_items} items
+                      {job.completed_items} succeeded · {job.failed_items} failed ·{" "}
+                      {job.canceled_items} canceled · {job.skipped_items} skipped
                     </span>
                     <span>
                       {new Date(job.created_at_epoch * 1000).toLocaleTimeString([], {
@@ -2075,6 +2303,24 @@ export default function App() {
                   </div>
                   {job.error_message && (
                     <div className="job-card-error">⚠️ {job.error_message}</div>
+                  )}
+                  {job.item_outcomes.length > 0 && (
+                    <details className="job-item-outcomes">
+                      <summary>Item outcomes ({job.item_outcomes.length})</summary>
+                      <ul>
+                        {job.item_outcomes.slice(0, 100).map((outcome, index) => (
+                          <li key={`${job.id}-${index}`} title={outcome.error_message || undefined}>
+                            <strong>{outcome.status}</strong> — {outcome.item_display}
+                            {(outcome.actual_destination_display || outcome.requested_destination_display) && (
+                              <> → {outcome.actual_destination_display || outcome.requested_destination_display}</>
+                            )}
+                          </li>
+                        ))}
+                      </ul>
+                      {job.item_outcomes.length > 100 && (
+                        <p>Showing first 100 of {job.item_outcomes.length} outcomes.</p>
+                      )}
+                    </details>
                   )}
                 </div>
               ))

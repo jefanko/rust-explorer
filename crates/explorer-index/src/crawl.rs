@@ -3,6 +3,7 @@ use explorer_domain::errors::ExplorerError;
 use explorer_domain::models::EntryKind;
 use explorer_win::enumerate::enumerate_directory;
 use std::collections::VecDeque;
+use std::os::windows::ffi::OsStringExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -52,6 +53,8 @@ impl MetadataCrawler {
         // BFS traversal queue: (dir_path, parent_entry_id)
         let mut queue: VecDeque<(PathBuf, Option<i64>)> = VecDeque::new();
         queue.push_back((root_path.to_path_buf(), None));
+        let mut completed_directories = Vec::new();
+        let mut partial_scan = false;
 
         let mut batch: Vec<IndexEntryRecord> = Vec::with_capacity(BATCH_SIZE);
         let mut last_flush = Instant::now();
@@ -76,14 +79,17 @@ impl MetadataCrawler {
             let entries = match enumerate_directory(&dir, None) {
                 Ok(entries) => entries,
                 Err(err) => {
-                    // Non-fatal permission/access issue on a subdirectory; log and continue
+                    // Preserve old entries for directories whose contents were not enumerated.
                     debug!("Skipping inaccessible folder {}: {err}", dir.display());
+                    partial_scan = true;
                     continue;
                 }
             };
+            completed_directories.push(dir.clone());
 
             for entry in entries {
-                let full_path = dir.join(&entry.display_name);
+                let native_name = std::ffi::OsString::from_wide(&entry.native_name_utf16);
+                let full_path = dir.join(native_name);
 
                 let is_reparse = entry.kind == EntryKind::ReparsePoint;
                 let is_dir = entry.kind == EntryKind::Directory;
@@ -142,12 +148,24 @@ impl MetadataCrawler {
             batch.clear();
         }
 
-        // Prune entries from older epochs that were removed from disk
-        let pruned = self.db.prune_unseen_entries(root_id, current_epoch)?;
+        // Prune only direct children of directories whose enumeration completed.
+        let mut pruned = 0;
+        for completed_dir in &completed_directories {
+            pruned += self
+                .db
+                .prune_unseen_children(root_id, completed_dir, current_epoch)?;
+        }
         debug!("Pruned {pruned} missing entries from root {root_id}");
 
-        // Mark root ready and update completion timestamp
-        self.db.complete_root_scan(root_id, current_epoch)?;
+        // Keep root state truthful if the root itself was unavailable or any subtree failed.
+        if completed_directories.is_empty() {
+            self.db.update_root_state(root_id, RootState::Offline)?;
+        } else if partial_scan {
+            self.db
+                .update_root_state(root_id, RootState::NeedsReconcile)?;
+        } else {
+            self.db.complete_root_scan(root_id, current_epoch)?;
+        }
 
         stats.elapsed = start_time.elapsed();
         info!(
@@ -182,7 +200,14 @@ mod tests {
     #[test]
     fn test_crawler_indexes_files_and_skips_exclusions() {
         let temp = tempdir().unwrap();
-        let root_dir = temp.path();
+        std::fs::write(
+            temp.path().join(".rust-explorer-fixture-root"),
+            "index fixture",
+        )
+        .unwrap();
+        let data_dir = temp.path().join("data");
+        std::fs::create_dir(&data_dir).unwrap();
+        let root_dir = data_dir.as_path();
 
         // Create test file structure
         let sub = root_dir.join("subfolder");

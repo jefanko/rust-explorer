@@ -121,6 +121,7 @@ mod tests {
             token: ItemToken::new(),
             parent_token: None,
             display_name: name.to_string(),
+            native_name_utf16: name.encode_utf16().collect(),
             escaped_name_hint: None,
             extension: name.split('.').next_back().unwrap_or("").to_string(),
             kind,

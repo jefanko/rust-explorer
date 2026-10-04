@@ -1,5 +1,5 @@
-use crate::path::path_to_wide;
-use crate::sink::{ShellProgressSink, SinkReport};
+use crate::path::{path_to_wide, shell_path_to_wide};
+use crate::sink::{ShellProgressSink, SinkItemCallback, SinkReport};
 use explorer_domain::errors::{ErrorCode, ExplorerError};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -121,143 +121,151 @@ pub fn open_in_windows_explorer(path: &Path) -> Result<(), ExplorerError> {
     Ok(())
 }
 
-/// Creates a new folder using Windows IFileOperation.
-pub fn shell_create_folder(parent: &Path, folder_name: &str) -> Result<PathBuf, ExplorerError> {
-    if !parent.is_dir() {
-        return Err(ExplorerError::new(
-            ErrorCode::NotFound,
-            format!("Parent folder does not exist: {}", parent.display()),
-            "shell_create_folder",
-        ));
+pub fn shell_create_folder(parent: &Path, name: &str) -> Result<PathBuf, ExplorerError> {
+    single_output(shell_create_folder_with_callback(parent, name, None)?)
+}
+pub fn shell_rename_item(source: &Path, name: &str) -> Result<PathBuf, ExplorerError> {
+    single_output(shell_rename_item_with_callback(source, name, None)?)
+}
+fn single_output(report: SinkReport) -> Result<PathBuf, ExplorerError> {
+    let item = report.item_results.first();
+    if let Some(item) = item
+        && item.status == explorer_domain::operations::ItemStatus::Succeeded
+        && let Some(path) = &item.actual_destination
+    {
+        return Ok(path.clone());
     }
-
-    let parent_wide = path_to_wide(parent);
-    let name_wide = path_to_wide(Path::new(folder_name));
-
+    Err(ExplorerError::new(
+        if report.was_aborted {
+            ErrorCode::Canceled
+        } else {
+            ErrorCode::Internal
+        },
+        report
+            .error_message
+            .unwrap_or_else(|| "The Shell did not report a completed output".into()),
+        "single_output",
+    ))
+}
+pub fn shell_create_folder_with_callback(
+    parent: &Path,
+    name: &str,
+    callback: Option<SinkItemCallback>,
+) -> Result<SinkReport, ExplorerError> {
+    shell_single_item(parent, name, true, callback)
+}
+pub fn shell_rename_item_with_callback(
+    source: &Path,
+    name: &str,
+    callback: Option<SinkItemCallback>,
+) -> Result<SinkReport, ExplorerError> {
+    shell_single_item(source, name, false, callback)
+}
+fn shell_single_item(
+    path: &Path,
+    name: &str,
+    create: bool,
+    callback: Option<SinkItemCallback>,
+) -> Result<SinkReport, ExplorerError> {
+    let wide = shell_path_to_wide(path)?;
+    let name = path_to_wide(Path::new(name));
+    let native_error = |e: windows::core::Error| {
+        let mut error = ExplorerError::new(
+            ErrorCode::Internal,
+            format!("Shell operation failed: {e}"),
+            "shell_single_item",
+        );
+        error.native_code = Some(e.code().0 as u32);
+        error
+    };
     unsafe {
-        let parent_item: IShellItem =
-            SHCreateItemFromParsingName(PCWSTR(parent_wide.as_ptr()), None).map_err(|e| {
+        let item: IShellItem =
+            SHCreateItemFromParsingName(PCWSTR(wide.as_ptr()), None).map_err(native_error)?;
+        if !create && path.is_dir() {
+            // This host's IFileOperation folder RenameItem fails with ERROR_FILE_NOT_FOUND
+            // before any callback. Use the native Shell folder transfer provider directly,
+            // with TSF_NORMAL (no overwrite), and journal its real returned result.
+            let parent_path = shell_path_to_wide(path.parent().ok_or_else(|| {
                 ExplorerError::new(
-                    ErrorCode::Internal,
-                    format!("Failed to bind parent ShellItem: {e}"),
-                    "shell_create_folder",
+                    ErrorCode::UnsupportedPath,
+                    "Cannot rename a root",
+                    "shell_single_item",
                 )
-            })?;
-
-        let file_op: IFileOperation =
-            CoCreateInstance(&FileOperation, None, CLSCTX_ALL).map_err(|e| {
-                ExplorerError::new(
-                    ErrorCode::Internal,
-                    format!("Failed to create IFileOperation: {e}"),
-                    "shell_create_folder",
-                )
-            })?;
-
-        // Queue folder creation
-        file_op
-            .NewItem(
-                &parent_item,
+            })?)?;
+            let parent: IShellItem =
+                SHCreateItemFromParsingName(PCWSTR(parent_path.as_ptr()), None)
+                    .map_err(native_error)?;
+            let transfer: windows::Win32::UI::Shell::ITransferSource = parent
+                .BindToHandler(None, &windows::Win32::UI::Shell::BHID_Transfer)
+                .map_err(native_error)?;
+            let (_, tracker) = ShellProgressSink::new_with_callback(false, callback);
+            let source = crate::path::ensure_extended_prefix(path);
+            // Preserve positive Shell HRESULTs; the high-level binding discards them.
+            use windows::core::Interface;
+            let mut raw_output = std::ptr::null_mut();
+            let hr = (Interface::vtable(&transfer).RenameItem)(
+                Interface::as_raw(&transfer),
+                Interface::as_raw(&item),
+                PCWSTR(name.as_ptr()),
+                windows::Win32::UI::Shell::TSF_NORMAL.0 as u32,
+                &mut raw_output,
+            );
+            let output = (!raw_output.is_null()).then(|| IShellItem::from_raw(raw_output));
+            tracker.record_provider_result(hr, source, crate::sink::shell_path(output.as_ref()));
+            return Ok(tracker.report());
+        }
+        let operation: IFileOperation =
+            CoCreateInstance(&FileOperation, None, CLSCTX_ALL).map_err(native_error)?;
+        operation
+            .SetOperationFlags(FILEOPERATION_FLAGS(
+                windows::Win32::UI::Shell::FOF_NOERRORUI.0 | FOF_ALLOWUNDO.0 | FOFX_ADDUNDORECORD.0,
+            ))
+            .map_err(native_error)?;
+        let (sink, tracker) = ShellProgressSink::new_with_callback(false, callback);
+        let sink: IFileOperationProgressSink = sink.into();
+        let cookie = operation.Advise(&sink).map_err(native_error)?;
+        let queued = if create {
+            operation.NewItem(
+                &item,
                 FILE_ATTRIBUTE_DIRECTORY.0,
-                PCWSTR(name_wide.as_ptr()),
+                PCWSTR(name.as_ptr()),
                 PCWSTR::null(),
                 None,
             )
-            .map_err(|e| {
-                ExplorerError::new(
-                    ErrorCode::Internal,
-                    format!("Failed to queue NewItem: {e}"),
-                    "shell_create_folder",
-                )
-            })?;
-
-        file_op.PerformOperations().map_err(|e| {
-            ExplorerError::new(
-                ErrorCode::Internal,
-                format!("Failed to perform folder creation: {e}"),
-                "shell_create_folder",
-            )
-        })?;
-
-        if file_op.GetAnyOperationsAborted().is_ok_and(|a| a.as_bool()) {
-            return Err(ExplorerError::new(
-                ErrorCode::Canceled,
-                "Folder creation was canceled",
-                "shell_create_folder",
-            ));
+        } else {
+            operation.RenameItem(&item, PCWSTR(name.as_ptr()), None)
+        };
+        if let Err(error) = queued {
+            let _ = operation.Unadvise(cookie);
+            return Err(native_error(error));
         }
+        let result = operation.PerformOperations();
+        let aborted = operation
+            .GetAnyOperationsAborted()
+            .is_ok_and(|b| b.as_bool());
+        let _ = operation.Unadvise(cookie);
+        Ok(finalize_sink_report(
+            tracker.report(),
+            aborted,
+            result,
+            1,
+            if create { "Create folder" } else { "Rename" },
+        ))
     }
-
-    Ok(parent.join(folder_name))
-}
-
-/// Renames a file or folder using Windows IFileOperation.
-pub fn shell_rename_item(source: &Path, new_name: &str) -> Result<PathBuf, ExplorerError> {
-    if !source.exists() {
-        return Err(ExplorerError::new(
-            ErrorCode::NotFound,
-            format!("Source item does not exist: {}", source.display()),
-            "shell_rename_item",
-        ));
-    }
-
-    let src_wide = path_to_wide(source);
-    let name_wide = path_to_wide(Path::new(new_name));
-
-    unsafe {
-        let src_item: IShellItem = SHCreateItemFromParsingName(PCWSTR(src_wide.as_ptr()), None)
-            .map_err(|e| {
-                ExplorerError::new(
-                    ErrorCode::Internal,
-                    format!("Failed to bind source ShellItem: {e}"),
-                    "shell_rename_item",
-                )
-            })?;
-
-        let file_op: IFileOperation =
-            CoCreateInstance(&FileOperation, None, CLSCTX_ALL).map_err(|e| {
-                ExplorerError::new(
-                    ErrorCode::Internal,
-                    format!("Failed to create IFileOperation: {e}"),
-                    "shell_rename_item",
-                )
-            })?;
-
-        // Queue rename operation
-        file_op
-            .RenameItem(&src_item, PCWSTR(name_wide.as_ptr()), None)
-            .map_err(|e| {
-                ExplorerError::new(
-                    ErrorCode::Internal,
-                    format!("Failed to queue RenameItem: {e}"),
-                    "shell_rename_item",
-                )
-            })?;
-
-        file_op.PerformOperations().map_err(|e| {
-            ExplorerError::new(
-                ErrorCode::Internal,
-                format!("Failed to perform rename operation: {e}"),
-                "shell_rename_item",
-            )
-        })?;
-
-        if file_op.GetAnyOperationsAborted().is_ok_and(|a| a.as_bool()) {
-            return Err(ExplorerError::new(
-                ErrorCode::Canceled,
-                "Rename operation was canceled",
-                "shell_rename_item",
-            ));
-        }
-    }
-
-    let parent = source.parent().unwrap_or(source);
-    Ok(parent.join(new_name))
 }
 
 /// Copies one or more files/folders into a destination directory using Windows IFileOperation.
 pub fn shell_copy_items(
     sources: &[PathBuf],
     destination_dir: &Path,
+) -> Result<SinkReport, ExplorerError> {
+    shell_copy_items_with_callback(sources, destination_dir, None)
+}
+
+pub fn shell_copy_items_with_callback(
+    sources: &[PathBuf],
+    destination_dir: &Path,
+    item_callback: Option<SinkItemCallback>,
 ) -> Result<SinkReport, ExplorerError> {
     if sources.is_empty() {
         return Err(ExplorerError::new(
@@ -277,7 +285,7 @@ pub fn shell_copy_items(
         ));
     }
 
-    let dest_wide = path_to_wide(destination_dir);
+    let dest_wide = shell_path_to_wide(destination_dir)?;
 
     unsafe {
         let dest_item: IShellItem = SHCreateItemFromParsingName(PCWSTR(dest_wide.as_ptr()), None)
@@ -307,7 +315,7 @@ pub fn shell_copy_items(
             )
         })?;
 
-        let (sink, tracker) = ShellProgressSink::new(false);
+        let (sink, tracker) = ShellProgressSink::new_with_callback(false, item_callback);
         let sink_interface: IFileOperationProgressSink = sink.into();
         let cookie = file_op.Advise(&sink_interface).map_err(|e| {
             ExplorerError::new(
@@ -318,7 +326,7 @@ pub fn shell_copy_items(
         })?;
 
         for src in sources {
-            let src_wide = path_to_wide(src);
+            let src_wide = shell_path_to_wide(src)?;
             let src_item: IShellItem =
                 match SHCreateItemFromParsingName(PCWSTR(src_wide.as_ptr()), None) {
                     Ok(item) => item,
@@ -348,28 +356,13 @@ pub fn shell_copy_items(
         let was_aborted = file_op.GetAnyOperationsAborted().is_ok_and(|a| a.as_bool());
         let _ = file_op.Unadvise(cookie);
 
-        let report = tracker.report();
-
-        if report.was_aborted || was_aborted {
-            let msg = report
-                .error_message
-                .unwrap_or_else(|| "Copy operation was canceled".to_string());
-            return Err(ExplorerError::new(
-                ErrorCode::Canceled,
-                msg,
-                "shell_copy_items",
-            ));
-        }
-
-        if let Err(e) = op_result {
-            return Err(ExplorerError::new(
-                ErrorCode::Internal,
-                format!("Failed to perform copy operations: {e}"),
-                "shell_copy_items",
-            ));
-        }
-
-        Ok(report)
+        Ok(finalize_sink_report(
+            tracker.report(),
+            was_aborted,
+            op_result,
+            sources.len(),
+            "Copy",
+        ))
     }
 }
 
@@ -377,6 +370,14 @@ pub fn shell_copy_items(
 pub fn shell_move_items(
     sources: &[PathBuf],
     destination_dir: &Path,
+) -> Result<SinkReport, ExplorerError> {
+    shell_move_items_with_callback(sources, destination_dir, None)
+}
+
+pub fn shell_move_items_with_callback(
+    sources: &[PathBuf],
+    destination_dir: &Path,
+    item_callback: Option<SinkItemCallback>,
 ) -> Result<SinkReport, ExplorerError> {
     if sources.is_empty() {
         return Err(ExplorerError::new(
@@ -396,7 +397,7 @@ pub fn shell_move_items(
         ));
     }
 
-    let dest_wide = path_to_wide(destination_dir);
+    let dest_wide = shell_path_to_wide(destination_dir)?;
 
     unsafe {
         let dest_item: IShellItem = SHCreateItemFromParsingName(PCWSTR(dest_wide.as_ptr()), None)
@@ -426,7 +427,7 @@ pub fn shell_move_items(
             )
         })?;
 
-        let (sink, tracker) = ShellProgressSink::new(false);
+        let (sink, tracker) = ShellProgressSink::new_with_callback(false, item_callback);
         let sink_interface: IFileOperationProgressSink = sink.into();
         let cookie = file_op.Advise(&sink_interface).map_err(|e| {
             ExplorerError::new(
@@ -437,7 +438,7 @@ pub fn shell_move_items(
         })?;
 
         for src in sources {
-            let src_wide = path_to_wide(src);
+            let src_wide = shell_path_to_wide(src)?;
             let src_item: IShellItem =
                 match SHCreateItemFromParsingName(PCWSTR(src_wide.as_ptr()), None) {
                     Ok(item) => item,
@@ -467,34 +468,26 @@ pub fn shell_move_items(
         let was_aborted = file_op.GetAnyOperationsAborted().is_ok_and(|a| a.as_bool());
         let _ = file_op.Unadvise(cookie);
 
-        let report = tracker.report();
-
-        if report.was_aborted || was_aborted {
-            let msg = report
-                .error_message
-                .unwrap_or_else(|| "Move operation was canceled".to_string());
-            return Err(ExplorerError::new(
-                ErrorCode::Canceled,
-                msg,
-                "shell_move_items",
-            ));
-        }
-
-        if let Err(e) = op_result {
-            return Err(ExplorerError::new(
-                ErrorCode::Internal,
-                format!("Failed to perform move operations: {e}"),
-                "shell_move_items",
-            ));
-        }
-
-        Ok(report)
+        Ok(finalize_sink_report(
+            tracker.report(),
+            was_aborted,
+            op_result,
+            sources.len(),
+            "Move",
+        ))
     }
 }
 
 /// Recycles one or more files/folders using Windows IFileOperation with guarded PreDeleteItem check.
 /// Rejects UNC paths before submission and never silently falls back to permanent deletion.
 pub fn shell_recycle_items(sources: &[PathBuf]) -> Result<SinkReport, ExplorerError> {
+    shell_recycle_items_with_callback(sources, None)
+}
+
+pub fn shell_recycle_items_with_callback(
+    sources: &[PathBuf],
+    item_callback: Option<SinkItemCallback>,
+) -> Result<SinkReport, ExplorerError> {
     if sources.is_empty() {
         return Err(ExplorerError::new(
             ErrorCode::UnsupportedPath,
@@ -506,7 +499,8 @@ pub fn shell_recycle_items(sources: &[PathBuf]) -> Result<SinkReport, ExplorerEr
     // Safety guard: reject UNC paths as Recycle Bin does not support UNC paths
     for src in sources {
         let s = src.to_string_lossy();
-        if s.starts_with(r"\\") || s.starts_with("//") {
+        if matches!(src.components().next(), Some(std::path::Component::Prefix(p)) if matches!(p.kind(), std::path::Prefix::UNC(_, _) | std::path::Prefix::VerbatimUNC(_, _)))
+        {
             return Err(ExplorerError::new(
                 ErrorCode::RecycleUnsupported,
                 format!(
@@ -522,6 +516,26 @@ pub fn shell_recycle_items(sources: &[PathBuf]) -> Result<SinkReport, ExplorerEr
                 "shell_recycle_items",
             ));
         }
+    }
+
+    for source in sources {
+        let normal = crate::path::strip_extended_prefix(source);
+        let volume = normal.ancestors().last().ok_or_else(|| {
+            ExplorerError::new(
+                ErrorCode::RecycleUnsupported,
+                "Volume unavailable",
+                "shell_recycle_items",
+            )
+        })?;
+        let volume = path_to_wide(volume);
+        let mut info = windows::Win32::UI::Shell::SHQUERYRBINFO {
+            cbSize: std::mem::size_of::<windows::Win32::UI::Shell::SHQUERYRBINFO>() as u32,
+            ..Default::default()
+        };
+        unsafe { windows::Win32::UI::Shell::SHQueryRecycleBinW(PCWSTR(volume.as_ptr()), &mut info) }.map_err(|e| {
+            let mut error = ExplorerError::new(ErrorCode::RecycleUnsupported, format!("Recycle support could not be verified for this volume: {e}. Source left intact; permanent fallback is forbidden."), "shell_recycle_items");
+            error.native_code = Some(e.code().0 as u32); error
+        })?;
     }
 
     unsafe {
@@ -545,7 +559,7 @@ pub fn shell_recycle_items(sources: &[PathBuf]) -> Result<SinkReport, ExplorerEr
             )
         })?;
 
-        let (sink, tracker) = ShellProgressSink::new(true);
+        let (sink, tracker) = ShellProgressSink::new_with_callback(true, item_callback);
         let sink_interface: IFileOperationProgressSink = sink.into();
         let cookie = file_op.Advise(&sink_interface).map_err(|e| {
             ExplorerError::new(
@@ -556,7 +570,7 @@ pub fn shell_recycle_items(sources: &[PathBuf]) -> Result<SinkReport, ExplorerEr
         })?;
 
         for src in sources {
-            let src_wide = path_to_wide(src);
+            let src_wide = shell_path_to_wide(src)?;
             let src_item: IShellItem =
                 match SHCreateItemFromParsingName(PCWSTR(src_wide.as_ptr()), None) {
                     Ok(item) => item,
@@ -584,36 +598,98 @@ pub fn shell_recycle_items(sources: &[PathBuf]) -> Result<SinkReport, ExplorerEr
         let was_aborted = file_op.GetAnyOperationsAborted().is_ok_and(|a| a.as_bool());
         let _ = file_op.Unadvise(cookie);
 
-        let report = tracker.report();
-
-        if report.was_aborted || was_aborted {
-            let msg = report
-                .error_message
-                .unwrap_or_else(|| "Recycle operation was canceled or aborted".to_string());
-            return Err(ExplorerError::new(
-                ErrorCode::Canceled,
-                msg,
-                "shell_recycle_items",
-            ));
-        }
-
-        if let Err(e) = op_result {
-            return Err(ExplorerError::new(
-                ErrorCode::Internal,
-                format!("Failed to perform recycle operations: {e}"),
-                "shell_recycle_items",
-            ));
-        }
-
-        Ok(report)
+        Ok(finalize_sink_report(
+            tracker.report(),
+            was_aborted,
+            op_result,
+            sources.len(),
+            "Recycle",
+        ))
     }
+}
+
+fn finalize_sink_report(
+    mut report: SinkReport,
+    shell_aborted: bool,
+    operation_result: windows::core::Result<()>,
+    expected_items: usize,
+    operation_name: &str,
+) -> SinkReport {
+    if let Err(error) = operation_result {
+        report.native_error = Some(error.code().0 as u32);
+        let canceled = crate::sink::classify_hresult(error.code())
+            == explorer_domain::operations::ItemStatus::Canceled;
+        report.was_aborted = canceled;
+        if !canceled {
+            let accounted = report.completed.saturating_add(report.failed);
+            report.failed = report
+                .failed
+                .saturating_add(expected_items.saturating_sub(accounted));
+        }
+        report.error_message = Some(format!(
+            "{operation_name} stopped with native error: {error}"
+        ));
+    } else {
+        report.was_aborted |= shell_aborted;
+        if report.was_aborted && report.error_message.is_none() {
+            report.error_message = Some(format!("{operation_name} operation was canceled"));
+        }
+    }
+    report
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::com::StaWorker;
-    use tempfile::tempdir;
+    fn tempdir() -> std::io::Result<tempfile::TempDir> {
+        let root = tempfile::tempdir()?;
+        std::fs::write(
+            root.path().join(".rust-explorer-fixture-root"),
+            "native Shell fixture",
+        )?;
+        Ok(root)
+    }
+
+    #[test]
+    fn native_failure_is_not_misreported_as_user_cancellation() {
+        let native = windows::core::HRESULT(0x80070002u32 as i32);
+        let report = finalize_sink_report(
+            SinkReport::default(),
+            true,
+            Err(windows::core::Error::from_hresult(native)),
+            1,
+            "Rename",
+        );
+        assert!(!report.was_aborted);
+        assert_eq!(report.failed, 1);
+        assert_eq!(report.native_error, Some(0x80070002));
+    }
+
+    #[test]
+    fn test_directory_provider_rename_preserves_both_sides_on_collision() {
+        let dir = tempdir().unwrap();
+        let source = dir.path().join("source");
+        let target = dir.path().join("target");
+        std::fs::create_dir(&source).unwrap();
+        std::fs::create_dir(&target).unwrap();
+        std::fs::write(source.join("source.txt"), "source intact").unwrap();
+        std::fs::write(target.join("target.txt"), "target intact").unwrap();
+        let sta = StaWorker::new("directory-collision-sta").unwrap();
+        let result = sta.execute({
+            let source = source.clone();
+            move || shell_rename_item(&source, "target")
+        });
+        assert!(result.is_err());
+        assert_eq!(
+            std::fs::read_to_string(source.join("source.txt")).unwrap(),
+            "source intact"
+        );
+        assert_eq!(
+            std::fs::read_to_string(target.join("target.txt")).unwrap(),
+            "target intact"
+        );
+    }
 
     #[test]
     fn test_shell_create_folder_and_rename_in_sta() {
@@ -692,10 +768,20 @@ mod tests {
         // Recycle item_moved.txt
         let recycle_target = sub1.join("item_moved.txt");
         let recycle_sources = vec![recycle_target.clone()];
-        let recycle_report = sta
-            .execute(move || shell_recycle_items(&recycle_sources))
-            .expect("shell recycle");
-        assert_eq!(recycle_report.completed, 1);
-        assert!(!recycle_target.exists());
+        let recycle_result = sta.execute(move || shell_recycle_items(&recycle_sources));
+        match recycle_result {
+            Ok(report) => {
+                assert_eq!(report.completed, 1, "{report:#?}");
+                assert!(!recycle_target.exists());
+            }
+            Err(error) => {
+                assert_eq!(error.code, ErrorCode::RecycleUnsupported);
+                assert!(error.native_code.is_some());
+                assert!(recycle_target.exists());
+                eprintln!(
+                    "CAPABILITY SKIP: successful recycling unavailable; unsupported volume rejected before submission: {error}"
+                );
+            }
+        }
     }
 }

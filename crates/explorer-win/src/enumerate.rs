@@ -2,6 +2,7 @@ use crate::path::{ensure_extended_prefix, path_to_wide, wide_to_path};
 use explorer_domain::errors::{ErrorCode, ExplorerError};
 use explorer_domain::ids::{FolderToken, ItemToken};
 use explorer_domain::models::{EntryKind, FileEntry};
+use std::os::windows::ffi::OsStrExt;
 use std::path::Path;
 use windows::Win32::Foundation::{ERROR_FILE_NOT_FOUND, GetLastError, HANDLE};
 use windows::Win32::Storage::FileSystem::{
@@ -125,6 +126,7 @@ pub fn enumerate_directory(
                 token: ItemToken::new(),
                 parent_token: parent_token.cloned(),
                 display_name: name.to_string(),
+                native_name_utf16: name_path.as_os_str().encode_wide().collect(),
                 escaped_name_hint: None,
                 extension,
                 kind,
@@ -154,7 +156,14 @@ mod tests {
     #[test]
     fn test_enumerate_temp_dir() {
         let temp_dir = tempfile::tempdir().expect("tempdir");
-        let path = temp_dir.path();
+        std::fs::write(
+            temp_dir.path().join(".rust-explorer-fixture-root"),
+            "listing fixture",
+        )
+        .unwrap();
+        let data_dir = temp_dir.path().join("data");
+        std::fs::create_dir(&data_dir).unwrap();
+        let path = data_dir.as_path();
 
         File::create(path.join("file1.txt")).expect("create file1");
         File::create(path.join("file2.log")).expect("create file2");

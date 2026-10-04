@@ -4,6 +4,7 @@ export interface FileEntry {
   token: string;
   parent_token?: string | null;
   display_name: string;
+  native_name_utf16: number[];
   escaped_name_hint?: string | null;
   extension: string;
   kind: EntryKind;
@@ -52,6 +53,7 @@ export interface BootstrapData {
 export interface NavigationResponse {
   folder_token: string;
   path_display: string;
+  path_utf16: number[];
   generation: number;
   total_entries: number;
 }
@@ -80,10 +82,7 @@ export type JobState =
 
 export interface OperationPlan {
   id: string;
-  commit_token: string;
   kind: OperationKind;
-  source_paths: string[];
-  destination_path?: string | null;
   target_name?: string | null;
   items_count: number;
   expires_at: number;
@@ -97,14 +96,21 @@ export interface JobSummary {
   total_items: number;
   completed_items: number;
   failed_items: number;
+  canceled_items: number;
+  skipped_items: number;
+  item_outcomes: ItemOutcome[];
   error_message?: string | null;
   created_at_epoch: number;
   updated_at_epoch: number;
 }
 
-export interface ClipboardPayload {
-  paths: string[];
-  is_cut: boolean;
+export interface ItemOutcome {
+  item_display: string;
+  requested_destination_display?: string | null;
+  actual_destination_display?: string | null;
+  status: "succeeded" | "failed" | "skipped" | "canceled";
+  native_code?: number | null;
+  error_message?: string | null;
 }
 
 export type WatchEventKind =
@@ -116,12 +122,13 @@ export type WatchEventKind =
   | "overflow";
 
 export interface WatchChange {
-  path: string;
+  path_utf16: number[];
   kind: WatchEventKind;
 }
 
 export interface WatchNotification {
-  dir_path: string;
+  dir_path_display: string;
+  dir_path_utf16: number[];
   is_overflow: boolean;
   changes: WatchChange[];
 }
@@ -137,7 +144,7 @@ export type RootState =
 
 export interface IndexedRoot {
   id: string;
-  path: string;
+  path_utf16: number[];
   display_path: string;
   state: RootState;
   completed_epoch: number;
@@ -148,6 +155,7 @@ export interface SearchResultItem {
   id: number;
   root_id: string;
   path: string;
+  path_utf16: number[];
   display_name: string;
   extension: string;
   kind: string;
@@ -163,6 +171,3 @@ export interface SearchResponse {
   page: number;
   page_size: number;
 }
-
-
-
