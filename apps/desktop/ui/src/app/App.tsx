@@ -131,6 +131,37 @@ export function matchFilterQuery(
   return entry.display_name.toLowerCase().includes(q);
 }
 
+export function getBreadcrumbs(path: string): { label: string; fullPath: string }[] {
+  if (!path) return [];
+  const parts = path.split(/[\\/]/).filter(Boolean);
+  const crumbs: { label: string; fullPath: string }[] = [];
+  let accumulated = "";
+
+  for (let i = 0; i < parts.length; i++) {
+    const part = parts[i];
+    if (i === 0 && part.includes(":")) {
+      accumulated = `${part}\\`;
+    } else {
+      accumulated = accumulated.endsWith("\\")
+        ? `${accumulated}${part}`
+        : `${accumulated}\\${part}`;
+    }
+    crumbs.push({ label: part, fullPath: accumulated });
+  }
+  return crumbs;
+}
+
+function getKnownFolderIcon(name: string): string {
+  const lower = name.toLowerCase();
+  if (lower.includes("desktop")) return "🖥️";
+  if (lower.includes("download")) return "📥";
+  if (lower.includes("document")) return "📄";
+  if (lower.includes("picture")) return "🖼️";
+  if (lower.includes("music")) return "🎵";
+  if (lower.includes("video")) return "🎬";
+  return "📁";
+}
+
 function sameWindowsPath(left: number[], right: number[]): boolean {
   if (left.length !== right.length) return false;
   for (let index = 0; index < left.length; index += 1) {
@@ -239,6 +270,7 @@ export default function App() {
   const [searchLoading, setSearchLoading] = useState<boolean>(false);
   const [searchError, setSearchError] = useState<string | null>(null);
   const [selectedSearchIndex, setSelectedSearchIndex] = useState<number>(-1);
+  const [isEditingAddress, setIsEditingAddress] = useState<boolean>(false);
 
   // Indexed roots state
   const [indexedRoots, setIndexedRoots] = useState<IndexedRoot[]>([]);
@@ -1293,11 +1325,14 @@ export default function App() {
         cycleTab(e.shiftKey ? -1 : 1);
         return;
       }
-      // Ctrl+L -> Focus address bar
-      if (e.ctrlKey && (e.key === "l" || e.key === "L")) {
+      // Ctrl+L / Alt+D -> Focus address bar
+      if ((e.ctrlKey && (e.key === "l" || e.key === "L")) || (e.altKey && (e.key === "d" || e.key === "D"))) {
         e.preventDefault();
-        addressInputRef.current?.focus();
-        addressInputRef.current?.select();
+        setIsEditingAddress(true);
+        setTimeout(() => {
+          addressInputRef.current?.focus();
+          addressInputRef.current?.select();
+        }, 50);
         return;
       }
       // Ctrl+F -> Focus filter
@@ -1437,7 +1472,7 @@ export default function App() {
 
   return (
     <div className="app-container" onContextMenu={handleBackgroundContextMenu}>
-      {/* Tab bar and Navigation Toolbar */}
+      {/* Tab bar, Navigation Toolbar, and Command Bar */}
       <header className="app-header">
         <div className="tab-bar" role="tablist">
           {tabs.map((tab, idx) => (
@@ -1449,6 +1484,7 @@ export default function App() {
               onClick={() => switchTab(idx)}
               title={tab.path}
             >
+              <span className="file-icon" style={{ fontSize: "14px" }}>📁</span>
               <span className="tab-title">{tab.title}</span>
               <button
                 className="tab-close-btn"
@@ -1470,9 +1506,11 @@ export default function App() {
           </button>
         </div>
 
+        {/* Row 1: Nav Buttons, Address Bar (Breadcrumbs), Search Box */}
         <div className="nav-toolbar">
           <div className="nav-buttons">
             <button
+              className="nav-btn"
               onClick={goBack}
               disabled={activeTab.historyIndex <= 0}
               aria-label="Back"
@@ -1481,6 +1519,7 @@ export default function App() {
               ←
             </button>
             <button
+              className="nav-btn"
               onClick={goForward}
               disabled={activeTab.historyIndex >= activeTab.history.length - 1}
               aria-label="Forward"
@@ -1488,84 +1527,93 @@ export default function App() {
             >
               →
             </button>
-            <button onClick={goUp} aria-label="Up" title="Up to Parent (Alt+Up)">
+            <button className="nav-btn" onClick={goUp} aria-label="Up" title="Up to Parent (Alt+Up)">
               ↑
-            </button>
-            <button onClick={refresh} aria-label="Refresh" title="Refresh (F5)">
-              🔄
             </button>
           </div>
 
-          <button
-            className="action-btn"
-            onClick={openCreateFolderModal}
-            title="New Folder (Ctrl+Shift+N)"
-            aria-label="New folder"
-          >
-            <span>📁+</span>
-            <span>New Folder</span>
-          </button>
-
-          <button
-            className="action-btn"
-            onClick={handleCopy}
-            disabled={activeTab.selectedTokens.size === 0}
-            title="Copy (Ctrl+C)"
-            aria-label="Copy"
-          >
-            <span>📋</span>
-            <span>Copy</span>
-          </button>
-
-          <button
-            className="action-btn"
-            onClick={handleCut}
-            disabled={activeTab.selectedTokens.size === 0}
-            title="Cut (Ctrl+X)"
-            aria-label="Cut"
-          >
-            <span>✂️</span>
-            <span>Cut</span>
-          </button>
-
-          <button
-            className="action-btn"
-            onClick={handlePaste}
-            title="Paste (Ctrl+V)"
-            aria-label="Paste"
-          >
-            <span>📥</span>
-            <span>Paste</span>
-          </button>
-
-          <button
-            className="action-btn"
-            onClick={() => openRecycleModal()}
-            disabled={activeTab.selectedTokens.size === 0}
-            title="Recycle (Delete)"
-            aria-label="Delete"
-          >
-            <span>🗑️</span>
-            <span>Delete</span>
-          </button>
-
-          <form
-            className="address-bar-container"
-            onSubmit={(e) => {
-              e.preventDefault();
-              navigateToPath(activeTab.addressInput);
-            }}
-          >
-            <input
-              ref={addressInputRef}
-              type="text"
-              className="address-input"
-              value={activeTab.addressInput}
-              onChange={(e) => updateActiveTab({ addressInput: e.target.value })}
-              aria-label="Address"
-              placeholder="Enter a path... (Ctrl+L)"
-            />
-          </form>
+          <div className="address-bar-wrapper">
+            <span className="address-folder-icon" aria-hidden="true">
+              📁
+            </span>
+            {!isEditingAddress ? (
+              <div
+                className="address-breadcrumbs-container"
+                onClick={() => {
+                  setIsEditingAddress(true);
+                  setTimeout(() => {
+                    addressInputRef.current?.focus();
+                    addressInputRef.current?.select();
+                  }, 50);
+                }}
+                title="Click to edit path (Ctrl+L / Alt+D)"
+              >
+                <div className="breadcrumb-segments">
+                  {getBreadcrumbs(activeTab.path).map((crumb, idx, arr) => (
+                    <span key={crumb.fullPath} className="breadcrumb-segment-wrapper">
+                      <button
+                        type="button"
+                        className="breadcrumb-segment-btn"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          navigateToPath(crumb.fullPath);
+                        }}
+                        title={crumb.fullPath}
+                      >
+                        {crumb.label}
+                      </button>
+                      {idx < arr.length - 1 && <span className="breadcrumb-chevron">›</span>}
+                    </span>
+                  ))}
+                </div>
+                <button
+                  type="button"
+                  className="address-refresh-btn"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    refresh();
+                  }}
+                  title="Refresh (F5)"
+                >
+                  🔄
+                </button>
+              </div>
+            ) : (
+              <form
+                className="address-edit-form"
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  setIsEditingAddress(false);
+                  navigateToPath(activeTab.addressInput);
+                }}
+              >
+                <input
+                  ref={addressInputRef}
+                  type="text"
+                  className="address-input"
+                  value={activeTab.addressInput}
+                  onChange={(e) => updateActiveTab({ addressInput: e.target.value })}
+                  onBlur={() => setIsEditingAddress(false)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Escape") {
+                      updateActiveTab({ addressInput: activeTab.path });
+                      setIsEditingAddress(false);
+                    }
+                  }}
+                  aria-label="Address"
+                  placeholder="Enter a path... (Ctrl+L)"
+                />
+                <button
+                  type="button"
+                  className="address-refresh-btn"
+                  onClick={() => refresh()}
+                  title="Refresh (F5)"
+                >
+                  🔄
+                </button>
+              </form>
+            )}
+          </div>
 
           <div className="search-container">
             <div className="search-scope-switcher">
@@ -1596,14 +1644,15 @@ export default function App() {
               </button>
             </div>
             <div className="search-input-wrapper">
+              <span className="search-icon" aria-hidden="true">🔍</span>
               <input
                 ref={filterInputRef}
                 type="text"
                 className="search-input"
                 placeholder={
                   searchScope === "folder"
-                    ? "Filter current folder (Press Enter to search subfolders)..."
-                    : "Search subfolders (e.g. invoice ext:pdf)..."
+                    ? "Filter current folder..."
+                    : "Search subfolders (e.g. *.exe)..."
                 }
                 value={searchScope === "folder" ? activeTab.filterQuery : indexedSearchQuery}
                 onChange={(e) => {
@@ -1636,23 +1685,126 @@ export default function App() {
               )}
             </div>
           </div>
+        </div>
+
+        {/* Row 2: Windows 11 Fluent Command Bar */}
+        <div className="command-bar">
+          <button
+            type="button"
+            className="command-btn primary-action"
+            onClick={openCreateFolderModal}
+            title="New Folder (Ctrl+Shift+N)"
+            aria-label="New folder"
+          >
+            <span className="command-icon">📁⁺</span>
+            <span>New</span>
+          </button>
+
+          <span className="command-divider" aria-hidden="true" />
 
           <button
-            className="theme-toggle-btn"
-            onClick={toggleTheme}
-            title={`Current theme: ${theme}. Click to switch theme.`}
-            aria-label="Toggle theme"
+            type="button"
+            className="command-btn"
+            onClick={handleCut}
+            disabled={activeTab.selectedTokens.size === 0}
+            title="Cut (Ctrl+X)"
+            aria-label="Cut"
           >
-            {theme === "system" ? "💻 Auto" : theme === "dark" ? "🌙 Dark" : "☀️ Light"}
+            <span className="command-icon">✂️</span>
+            <span>Cut</span>
           </button>
+
           <button
-            className="theme-toggle-btn"
+            type="button"
+            className="command-btn"
+            onClick={handleCopy}
+            disabled={activeTab.selectedTokens.size === 0}
+            title="Copy (Ctrl+C)"
+            aria-label="Copy"
+          >
+            <span className="command-icon">📋</span>
+            <span>Copy</span>
+          </button>
+
+          <button
+            type="button"
+            className="command-btn"
+            onClick={handlePaste}
+            title="Paste (Ctrl+V)"
+            aria-label="Paste"
+          >
+            <span className="command-icon">📥</span>
+            <span>Paste</span>
+          </button>
+
+          <button
+            type="button"
+            className="command-btn"
+            onClick={() => openRenameModal()}
+            disabled={activeTab.selectedTokens.size !== 1}
+            title="Rename (F2)"
+            aria-label="Rename"
+          >
+            <span className="command-icon">✏️</span>
+            <span>Rename</span>
+          </button>
+
+          <button
+            type="button"
+            className="command-btn"
+            onClick={() => openRecycleModal()}
+            disabled={activeTab.selectedTokens.size === 0}
+            title="Recycle (Delete)"
+            aria-label="Delete"
+          >
+            <span className="command-icon">🗑️</span>
+            <span>Delete</span>
+          </button>
+
+          <span className="command-divider" aria-hidden="true" />
+
+          <button
+            type="button"
+            className={`command-btn ${showHiddenFiles ? "active" : ""}`}
             onClick={toggleHiddenFiles}
             title="Show or hide hidden files"
             aria-label="Toggle hidden files"
             aria-pressed={showHiddenFiles}
           >
-            {showHiddenFiles ? "Hidden On" : "Hidden Off"}
+            <span className="command-icon">👁️</span>
+            <span>{showHiddenFiles ? "Hidden: On" : "Hidden: Off"}</span>
+          </button>
+
+          <span className="command-spacer" />
+
+          <button
+            type="button"
+            className={`command-btn ${showJobsDrawer ? "active" : ""}`}
+            onClick={() => {
+              setShowJobsDrawer(!showJobsDrawer);
+              refreshJobs();
+            }}
+            title="Toggle Background Jobs Activity"
+          >
+            <span className="command-icon">⚡</span>
+            <span>Activity</span>
+            {jobs.filter((j) => j.state === "running" || j.state === "validating").length > 0 && (
+              <span className="jobs-count-badge">
+                {jobs.filter((j) => j.state === "running" || j.state === "validating").length}
+              </span>
+            )}
+          </button>
+
+          <button
+            type="button"
+            className="command-btn"
+            onClick={toggleTheme}
+            title={`Current theme: ${theme}. Click to switch theme.`}
+            aria-label="Toggle theme"
+          >
+            <span className="command-icon">
+              {theme === "system" ? "💻" : theme === "dark" ? "🌙" : "☀️"}
+            </span>
           </button>
         </div>
       </header>
@@ -1698,7 +1850,7 @@ export default function App() {
 
           {/* Known Folders */}
           <section className="sidebar-section">
-            <h3>Known Folders</h3>
+            <h3>Quick Access</h3>
             <ul>
               {knownFolders.map((kf) => (
                 <li
@@ -1707,7 +1859,7 @@ export default function App() {
                   className={activeTab.path === kf.path ? "active" : ""}
                 >
                   <div className="sidebar-fav-item">
-                    <span className="sidebar-icon">📁</span>
+                    <span className="sidebar-icon">{getKnownFolderIcon(kf.name)}</span>
                     <span className="sidebar-label">{kf.name}</span>
                   </div>
                 </li>
@@ -1717,20 +1869,41 @@ export default function App() {
 
           {/* Drives */}
           <section className="sidebar-section">
-            <h3>Drives</h3>
+            <h3>This PC</h3>
             <ul>
-              {drives.map((d) => (
-                <li
-                  key={d.path}
-                  onClick={() => navigateToPath(d.path)}
-                  className={activeTab.path === d.path ? "active" : ""}
-                >
-                  <div className="sidebar-fav-item">
-                    <span className="sidebar-icon">💾</span>
-                    <span className="sidebar-label">{d.name}</span>
-                  </div>
-                </li>
-              ))}
+              {drives.map((d) => {
+                const hasMetrics = d.total_bytes && d.total_bytes > 0;
+                const usedBytes = hasMetrics ? (d.total_bytes! - (d.free_bytes || 0)) : 0;
+                const usedPct = hasMetrics ? Math.round((usedBytes / d.total_bytes!) * 100) : 0;
+                return (
+                  <li
+                    key={d.path}
+                    onClick={() => navigateToPath(d.path)}
+                    className={activeTab.path === d.path ? "active" : ""}
+                    title={hasMetrics ? `${formatBytes(d.free_bytes)} free of ${formatBytes(d.total_bytes)}` : d.path}
+                  >
+                    <div className="sidebar-fav-item">
+                      <span className="sidebar-icon">💾</span>
+                      <div className="drive-info-container">
+                        <span className="sidebar-label">{d.name}</span>
+                        {hasMetrics && (
+                          <>
+                            <div className="drive-capacity-bar">
+                              <div
+                                className={`drive-capacity-fill ${usedPct > 90 ? "high-usage" : ""}`}
+                                style={{ width: `${usedPct}%` }}
+                              />
+                            </div>
+                            <span className="drive-capacity-text">
+                              {formatBytes(d.free_bytes)} free
+                            </span>
+                          </>
+                        )}
+                      </div>
+                    </div>
+                  </li>
+                );
+              })}
             </ul>
           </section>
 
@@ -2148,6 +2321,55 @@ export default function App() {
             </>
           ) : contextMenu.entry ? (
             <>
+              <div className="context-menu-quick-actions">
+                <button
+                  type="button"
+                  className="context-quick-btn"
+                  title="Cut (Ctrl+X)"
+                  onClick={() => {
+                    setContextMenu(null);
+                    handleCut();
+                  }}
+                >
+                  ✂️
+                </button>
+                <button
+                  type="button"
+                  className="context-quick-btn"
+                  title="Copy (Ctrl+C)"
+                  onClick={() => {
+                    setContextMenu(null);
+                    handleCopy();
+                  }}
+                >
+                  📋
+                </button>
+                <button
+                  type="button"
+                  className="context-quick-btn"
+                  title="Rename (F2)"
+                  onClick={() => {
+                    const entry = contextMenu.entry!;
+                    setContextMenu(null);
+                    openRenameModal(entry);
+                  }}
+                >
+                  ✏️
+                </button>
+                <button
+                  type="button"
+                  className="context-quick-btn"
+                  title="Delete (Del)"
+                  onClick={() => {
+                    const entry = contextMenu.entry!;
+                    setContextMenu(null);
+                    openRecycleModal(entry);
+                  }}
+                >
+                  🗑️
+                </button>
+              </div>
+
               <div
                 className="context-menu-item"
                 onClick={() => {

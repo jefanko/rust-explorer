@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { matchFilterQuery } from "../app/App";
+import { matchFilterQuery, getBreadcrumbs } from "../app/App";
 
 function formatBytes(bytes?: number | null): string {
   if (bytes === null || bytes === undefined) return "";
@@ -119,26 +119,6 @@ describe("App Formatting and Tab Helpers", () => {
   });
 
   it("splits Windows paths into breadcrumb segments correctly", () => {
-    function getBreadcrumbs(path: string): { label: string; fullPath: string }[] {
-      if (!path) return [];
-      const parts = path.split(/[\\/]/).filter(Boolean);
-      const crumbs: { label: string; fullPath: string }[] = [];
-      let accumulated = "";
-
-      for (let i = 0; i < parts.length; i++) {
-        const part = parts[i];
-        if (i === 0 && part.includes(":")) {
-          accumulated = `${part}\\`;
-        } else {
-          accumulated = accumulated.endsWith("\\")
-            ? `${accumulated}${part}`
-            : `${accumulated}\\${part}`;
-        }
-        crumbs.push({ label: part, fullPath: accumulated });
-      }
-      return crumbs;
-    }
-
     const crumbs = getBreadcrumbs("C:\\Users\\Default\\Documents");
     expect(crumbs).toHaveLength(4);
     expect(crumbs[0]).toEqual({ label: "C:", fullPath: "C:\\" });
