@@ -56,12 +56,54 @@ pub fn shell_path_to_wide(path: &Path) -> Result<Vec<u16>, ExplorerError> {
     Ok(path_to_wide(&path))
 }
 
+/// Ensures that a bare drive root path (e.g. `C:` or `\\?\C:`) has a trailing backslash (`C:\` or `\\?\C:\`).
+/// In Win32 API, `\\?\C:` is invalid syntax, and `C:` refers to relative current-drive directory.
+/// Explicit navigation or enumeration of a drive root must always be targeted as a directory root with `\`.
+pub fn normalize_drive_root(path: &Path) -> PathBuf {
+    let units: Vec<u16> = path.as_os_str().encode_wide().collect();
+    let is_drive_letter = |u: u16| (65..=90).contains(&u) || (97..=122).contains(&u);
+
+    // Bare drive: e.g. "C:" or "c:" (units.len() == 2)
+    if units.len() == 2 && is_drive_letter(units[0]) && units[1] == 58 {
+        let mut fixed = units;
+        fixed.push(92);
+        return PathBuf::from(OsString::from_wide(&fixed));
+    }
+
+    // Extended bare drive: e.g. r"\\?\C:" or r"\\?\c:" (units.len() == 6)
+    let extended_prefix: Vec<u16> = r"\\?\".encode_utf16().collect();
+    if units.len() == 6
+        && units.starts_with(&extended_prefix)
+        && is_drive_letter(units[4])
+        && units[5] == 58
+    {
+        let mut fixed = units;
+        fixed.push(92);
+        return PathBuf::from(OsString::from_wide(&fixed));
+    }
+
+    // Device bare drive: e.g. r"\\.\C:" or r"\\.\c:" (units.len() == 6)
+    let device_prefix: Vec<u16> = r"\\.\".encode_utf16().collect();
+    if units.len() == 6
+        && units.starts_with(&device_prefix)
+        && is_drive_letter(units[4])
+        && units[5] == 58
+    {
+        let mut fixed = units;
+        fixed.push(92);
+        return PathBuf::from(OsString::from_wide(&fixed));
+    }
+
+    path.to_path_buf()
+}
+
 /// Appends `\\?\` or `\\?\UNC\` prefix if needed for paths exceeding MAX_PATH (260 characters).
 pub fn ensure_extended_prefix(path: &Path) -> PathBuf {
-    let units: Vec<u16> = path.as_os_str().encode_wide().collect();
+    let normalized = normalize_drive_root(path);
+    let units: Vec<u16> = normalized.as_os_str().encode_wide().collect();
     let starts_with = |prefix: &str| units.starts_with(&prefix.encode_utf16().collect::<Vec<_>>());
     if starts_with(r"\\?\") {
-        return path.to_path_buf();
+        return normalized;
     }
 
     let mut prefixed: Vec<u16>;
@@ -207,5 +249,41 @@ mod tests {
         assert!(validate_safe_path(Path::new(r"C:\folder\CON.txt")).is_err());
         assert!(validate_safe_path(Path::new(r"C:\file.txt:hidden")).is_err());
         assert!(validate_safe_path(Path::new(r"\\?\C:\file.txt:hidden")).is_err());
+    }
+
+    #[test]
+    fn test_normalize_drive_root() {
+        assert_eq!(normalize_drive_root(Path::new("C:")), PathBuf::from(r"C:\"));
+        assert_eq!(normalize_drive_root(Path::new("d:")), PathBuf::from(r"d:\"));
+        assert_eq!(
+            normalize_drive_root(Path::new(r"\\?\C:")),
+            PathBuf::from(r"\\?\C:\")
+        );
+        assert_eq!(
+            normalize_drive_root(Path::new(r"\\?\D:")),
+            PathBuf::from(r"\\?\D:\")
+        );
+        assert_eq!(
+            normalize_drive_root(Path::new(r"\\.\C:")),
+            PathBuf::from(r"\\.\C:\")
+        );
+        // Already normalized should remain unchanged
+        assert_eq!(
+            normalize_drive_root(Path::new(r"C:\")),
+            PathBuf::from(r"C:\")
+        );
+        assert_eq!(
+            normalize_drive_root(Path::new(r"\\?\C:\")),
+            PathBuf::from(r"\\?\C:\")
+        );
+        // Subpaths should remain unchanged
+        assert_eq!(
+            normalize_drive_root(Path::new(r"C:\Users")),
+            PathBuf::from(r"C:\Users")
+        );
+        assert_eq!(
+            normalize_drive_root(Path::new(r"\\?\C:\Users")),
+            PathBuf::from(r"\\?\C:\Users")
+        );
     }
 }

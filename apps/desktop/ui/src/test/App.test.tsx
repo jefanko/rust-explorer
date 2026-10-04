@@ -1,5 +1,11 @@
 import { describe, it, expect } from "vitest";
-import { matchFilterQuery, getBreadcrumbs } from "../app/App";
+import {
+  matchFilterQuery,
+  getBreadcrumbs,
+  getParentPathUtf16,
+  getParentPathString,
+  getParentPath,
+} from "../app/App";
 
 function formatBytes(bytes?: number | null): string {
   if (bytes === null || bytes === undefined) return "";
@@ -158,6 +164,41 @@ describe("App Formatting and Tab Helpers", () => {
     expect(getRecycleConfirmationMessage(["a.txt", "b.txt", "c.txt"])).toBe(
       "Are you sure you want to move these 3 items to the Recycle Bin?"
     );
+  });
+
+  it("computes parent folder correctly for extended, DOS, and UNC paths without stripping drive root slash", () => {
+    // 1. Extended drive paths
+    expect(getParentPathString("\\\\?\\D:\\dev")).toBe("\\\\?\\D:\\");
+    expect(getParentPathString("\\\\?\\D:\\dev\\rust-explorer")).toBe("\\\\?\\D:\\dev");
+    expect(getParentPathString("\\\\?\\D:\\")).toBeNull();
+    expect(getParentPathString("\\\\?\\D:")).toBeNull();
+
+    // 2. Standard DOS drive paths
+    expect(getParentPathString("D:\\dev")).toBe("D:\\");
+    expect(getParentPathString("D:\\dev\\rust-explorer")).toBe("D:\\dev");
+    expect(getParentPathString("D:\\")).toBeNull();
+    expect(getParentPathString("D:")).toBeNull();
+
+    // 3. UNC paths
+    expect(getParentPathString("\\\\server\\share\\sub")).toBe("\\\\server\\share");
+    expect(getParentPathString("\\\\server\\share")).toBeNull();
+    expect(getParentPathString("\\\\?\\UNC\\server\\share\\sub")).toBe("\\\\?\\UNC\\server\\share");
+    expect(getParentPathString("\\\\?\\UNC\\server\\share")).toBeNull();
+
+    // 4. UTF-16 code units helper
+    const toUnits = (s: string) => Array.from(s).map((c) => c.charCodeAt(0));
+    const fromUnits = (u: number[] | null) => (u ? String.fromCharCode(...u) : null);
+
+    expect(fromUnits(getParentPathUtf16(toUnits("\\\\?\\D:\\dev")))).toBe("\\\\?\\D:\\");
+    expect(getParentPathUtf16(toUnits("\\\\?\\D:\\"))).toBeNull();
+
+    // 5. Unified getParentPath
+    const parentDev = getParentPath(toUnits("\\\\?\\D:\\dev"), "D:\\dev");
+    expect(parentDev).not.toBeNull();
+    expect(fromUnits(parentDev!.utf16!)).toBe("\\\\?\\D:\\");
+
+    const parentRoot = getParentPath(toUnits("\\\\?\\D:\\"), "D:\\");
+    expect(parentRoot).toBeNull();
   });
 });
 

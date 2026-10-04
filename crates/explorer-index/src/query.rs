@@ -168,7 +168,11 @@ fn process_token(
         *extension_filter = Some(clean_ext.to_string());
     } else if let Some(ext) = lower.strip_prefix("*.") {
         let clean_ext = ext.trim();
-        if clean_ext != "*" && !clean_ext.is_empty() && !clean_ext.contains('*') && !clean_ext.contains('?') {
+        if clean_ext != "*"
+            && !clean_ext.is_empty()
+            && !clean_ext.contains('*')
+            && !clean_ext.contains('?')
+        {
             *extension_filter = Some(clean_ext.to_string());
         }
     } else if lower.starts_with('.') && lower.len() > 1 {

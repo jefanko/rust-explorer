@@ -1,4 +1,4 @@
-use crate::path::{ensure_extended_prefix, path_to_wide, wide_to_path};
+use crate::path::{ensure_extended_prefix, normalize_drive_root, path_to_wide, wide_to_path};
 use explorer_domain::errors::{ErrorCode, ExplorerError};
 use explorer_domain::ids::{FolderToken, ItemToken};
 use explorer_domain::models::{EntryKind, FileEntry};
@@ -17,6 +17,9 @@ pub fn enumerate_directory(
     dir_path: &Path,
     parent_token: Option<&FolderToken>,
 ) -> Result<Vec<FileEntry>, ExplorerError> {
+    let normalized = normalize_drive_root(dir_path);
+    let dir_path = normalized.as_path();
+
     if !dir_path.exists() {
         return Err(ExplorerError::new(
             ErrorCode::NotFound,

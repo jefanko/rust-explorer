@@ -38,11 +38,14 @@ impl FolderService {
 
     /// Navigates to a folder path, enumerates its contents, and caches the snapshot.
     pub fn navigate(&self, target_path: &Path) -> Result<NavigationResponse, ExplorerError> {
+        let normalized_target = explorer_win::path::normalize_drive_root(target_path);
+        let target_path = normalized_target.as_path();
         validate_safe_path(target_path)?;
 
         let canonical = target_path
             .canonicalize()
             .unwrap_or_else(|_| target_path.to_path_buf());
+        let canonical = explorer_win::path::normalize_drive_root(&canonical);
         let folder_token = FolderToken::new();
         let generation = self.generation_counter.fetch_add(1, Ordering::SeqCst);
         let path_display = to_display_string(&canonical);

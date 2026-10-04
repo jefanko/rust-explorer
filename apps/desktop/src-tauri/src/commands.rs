@@ -625,5 +625,6 @@ fn path_from_utf16(
             operation,
         ));
     }
-    Ok(PathBuf::from(std::ffi::OsString::from_wide(&path_utf16)))
+    let p = PathBuf::from(std::ffi::OsString::from_wide(&path_utf16));
+    Ok(explorer_win::path::normalize_drive_root(&p))
 }

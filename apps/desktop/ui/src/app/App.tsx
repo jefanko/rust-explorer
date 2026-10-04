@@ -12,6 +12,11 @@ import {
   IndexedRoot,
   SearchResultItem,
 } from "../bridge/types";
+import {
+  FluentIcon,
+  getFluentFileIcon,
+  getFluentKnownFolderIcon,
+} from "./FluentIcon";
 
 function formatBytes(bytes?: number | null): string {
   if (bytes === null || bytes === undefined) return "";
@@ -37,18 +42,7 @@ function formatFiletime(filetime?: number | null): string {
 }
 
 function getFileIcon(entry: { kind: string; extension: string }) {
-  if (entry.kind === "directory") {
-    return "📁";
-  }
-  const ext = entry.extension.toLowerCase();
-  if (["png", "jpg", "jpeg", "gif", "bmp", "webp", "svg"].includes(ext)) return "🖼️";
-  if (["mp4", "mkv", "avi", "mov", "wmv"].includes(ext)) return "🎬";
-  if (["mp3", "wav", "flac", "m4a", "ogg"].includes(ext)) return "🎵";
-  if (["zip", "rar", "7z", "tar", "gz"].includes(ext)) return "📦";
-  if (["exe", "msi", "bat", "cmd", "ps1"].includes(ext)) return "⚙️";
-  if (["pdf"].includes(ext)) return "📕";
-  if (["txt", "md", "rs", "ts", "tsx", "js", "json", "toml", "html", "css"].includes(ext)) return "📄";
-  return "📄";
+  return <FluentIcon name={getFluentFileIcon(entry)} size={16} />;
 }
 
 function getTabTitle(path: string): string {
@@ -151,15 +145,147 @@ export function getBreadcrumbs(path: string): { label: string; fullPath: string 
   return crumbs;
 }
 
-function getKnownFolderIcon(name: string): string {
-  const lower = name.toLowerCase();
-  if (lower.includes("desktop")) return "🖥️";
-  if (lower.includes("download")) return "📥";
-  if (lower.includes("document")) return "📄";
-  if (lower.includes("picture")) return "🖼️";
-  if (lower.includes("music")) return "🎵";
-  if (lower.includes("video")) return "🎬";
-  return "📁";
+export function getParentPathUtf16(units: number[]): number[] | null {
+  if (!units || units.length === 0) return null;
+
+  // Trim any trailing slashes (e.g. D:\foo\ -> D:\foo)
+  let end = units.length;
+  while (end > 0 && (units[end - 1] === 92 || units[end - 1] === 47)) {
+    end--;
+  }
+  if (end === 0) return null;
+
+  const isLetter = (u: number) => (u >= 65 && u <= 90) || (u >= 97 && u <= 122);
+
+  // Check for extended prefix: \\?\
+  const isExtended =
+    end >= 4 &&
+    units[0] === 92 &&
+    units[1] === 92 &&
+    units[2] === 63 &&
+    units[3] === 92;
+
+  // Check for device prefix: \\.\
+  const isDevice =
+    end >= 4 &&
+    units[0] === 92 &&
+    units[1] === 92 &&
+    units[2] === 46 &&
+    units[3] === 92;
+
+  // Check for \\?\UNC\
+  const isExtendedUnc =
+    isExtended &&
+    end >= 8 &&
+    (units[4] === 85 || units[4] === 117) &&
+    (units[5] === 78 || units[5] === 110) &&
+    (units[6] === 67 || units[6] === 99) &&
+    units[7] === 92;
+
+  // 1. Extended or Device Drive Root: \\?\C: or \\.\C:
+  if ((isExtended || isDevice) && !isExtendedUnc && end >= 6 && isLetter(units[4]) && units[5] === 58) {
+    if (end === 6) return null; // Already at \\?\C: (root)
+    const lastSep = Math.max(
+      units.slice(0, end).lastIndexOf(92),
+      units.slice(0, end).lastIndexOf(47)
+    );
+    if (lastSep < 6) return null;
+    // If last separator is index 6 (right after C:), parent is the drive root WITH trailing slash (\\?\C:\)
+    if (lastSep === 6) {
+      return units.slice(0, 7);
+    }
+    return units.slice(0, lastSep);
+  }
+
+  // 2. Standard DOS Drive Root: C:
+  if (end >= 2 && isLetter(units[0]) && units[1] === 58) {
+    if (end === 2) return null; // Already at C: (root)
+    const lastSep = Math.max(
+      units.slice(0, end).lastIndexOf(92),
+      units.slice(0, end).lastIndexOf(47)
+    );
+    if (lastSep < 2) return null;
+    // If last separator is index 2 (right after C:), parent is the drive root WITH trailing slash (C:\)
+    if (lastSep === 2) {
+      return units.slice(0, 3);
+    }
+    return units.slice(0, lastSep);
+  }
+
+  // 3. Extended UNC: \\?\UNC\server\share\...
+  if (isExtendedUnc) {
+    const serverSlash = units.slice(8, end).indexOf(92);
+    if (serverSlash < 0) return null;
+    const shareStart = 8 + serverSlash + 1;
+    const shareSlash = units.slice(shareStart, end).indexOf(92);
+    if (shareSlash < 0) return null; // At share root: \\?\UNC\server\share
+    const shareEnd = shareStart + shareSlash;
+    const lastSep = Math.max(
+      units.slice(0, end).lastIndexOf(92),
+      units.slice(0, end).lastIndexOf(47)
+    );
+    if (lastSep <= shareEnd) {
+      return units.slice(0, shareEnd);
+    }
+    return units.slice(0, lastSep);
+  }
+
+  // 4. Standard UNC: \\server\share\...
+  if (end >= 2 && units[0] === 92 && units[1] === 92) {
+    const serverSlash = units.slice(2, end).indexOf(92);
+    if (serverSlash < 0) return null;
+    const shareStart = 2 + serverSlash + 1;
+    const shareSlash = units.slice(shareStart, end).indexOf(92);
+    if (shareSlash < 0) return null; // At share root: \\server\share
+    const shareEnd = shareStart + shareSlash;
+    const lastSep = Math.max(
+      units.slice(0, end).lastIndexOf(92),
+      units.slice(0, end).lastIndexOf(47)
+    );
+    if (lastSep <= shareEnd) {
+      return units.slice(0, shareEnd);
+    }
+    return units.slice(0, lastSep);
+  }
+
+  // 5. Generic or relative path
+  const lastSep = Math.max(
+    units.slice(0, end).lastIndexOf(92),
+    units.slice(0, end).lastIndexOf(47)
+  );
+  if (lastSep <= 0) return null;
+  return units.slice(0, lastSep);
+}
+
+export function getParentPathString(path: string): string | null {
+  if (!path) return null;
+  const codes = Array.from(path).map((c) => c.charCodeAt(0));
+  const parentCodes = getParentPathUtf16(codes);
+  if (!parentCodes) return null;
+  return String.fromCharCode(...parentCodes);
+}
+
+export function getParentPath(
+  nativeUnits?: number[],
+  displayPath?: string
+): { utf16?: number[]; display?: string } | null {
+  if (nativeUnits && nativeUnits.length > 0) {
+    const parentUnits = getParentPathUtf16(nativeUnits);
+    if (parentUnits) {
+      return { utf16: parentUnits };
+    }
+  }
+  if (displayPath && displayPath.length > 0) {
+    const parentStr = getParentPathString(displayPath);
+    if (parentStr) {
+      return { display: parentStr };
+    }
+  }
+  return null;
+}
+
+function getKnownFolderIcon(name: string) {
+  return <FluentIcon name={getFluentKnownFolderIcon(name)} size={16} />;
 }
 
 function sameWindowsPath(left: number[], right: number[]): boolean {
@@ -290,6 +416,7 @@ export default function App() {
   activeTabIndexRef.current = activeTabIndex;
 
   const activeTab = tabs[activeTabIndex] || tabs[0];
+  const canGoUp = Boolean(getParentPath(activeTab?.nativePathUtf16, activeTab?.path));
   const activeTabRef = useRef(activeTab);
   activeTabRef.current = activeTab;
 
@@ -837,13 +964,13 @@ export default function App() {
 
   function goUp() {
     const cur = activeTabRef.current;
-    const units = cur.nativePathUtf16;
-    if (units.length === 0) return;
-    const separator = Math.max(units.lastIndexOf(92), units.lastIndexOf(47));
-    if (separator < 0) return;
-    const isDriveRootSeparator = separator === 2 && units[1] === 58;
-    const parent = units.slice(0, separator + (isDriveRootSeparator ? 1 : 0));
-    if (parent.length > 0 && parent.length < units.length) navigateToPath(parent);
+    const parent = getParentPath(cur.nativePathUtf16, cur.path);
+    if (!parent) return;
+    if (parent.utf16) {
+      navigateToPath(parent.utf16);
+    } else if (parent.display) {
+      navigateToPath(parent.display);
+    }
   }
 
   function refresh(targetTabId?: string | React.MouseEvent) {
@@ -1484,7 +1611,9 @@ export default function App() {
               onClick={() => switchTab(idx)}
               title={tab.path}
             >
-              <span className="file-icon" style={{ fontSize: "14px" }}>📁</span>
+              <span className="file-icon" style={{ fontSize: "14px" }}>
+                <FluentIcon name="folder" size={14} />
+              </span>
               <span className="tab-title">{tab.title}</span>
               <button
                 className="tab-close-btn"
@@ -1492,7 +1621,7 @@ export default function App() {
                 title="Close Tab (Ctrl+W)"
                 onClick={(e) => closeTab(idx, e)}
               >
-                ×
+                <FluentIcon name="close" size={10} />
               </button>
             </div>
           ))}
@@ -1502,7 +1631,7 @@ export default function App() {
             title="New Tab (Ctrl+T)"
             onClick={() => createNewTab()}
           >
-            +
+            <FluentIcon name="add" size={13} />
           </button>
         </div>
 
@@ -1516,7 +1645,7 @@ export default function App() {
               aria-label="Back"
               title="Back (Alt+Left)"
             >
-              ←
+              <FluentIcon name="arrow-left" size={14} />
             </button>
             <button
               className="nav-btn"
@@ -1525,16 +1654,22 @@ export default function App() {
               aria-label="Forward"
               title="Forward (Alt+Right)"
             >
-              →
+              <FluentIcon name="arrow-right" size={14} />
             </button>
-            <button className="nav-btn" onClick={goUp} aria-label="Up" title="Up to Parent (Alt+Up)">
-              ↑
+            <button
+              className="nav-btn"
+              onClick={goUp}
+              disabled={!canGoUp}
+              aria-label="Up"
+              title={canGoUp ? "Up to Parent (Alt+Up)" : "At root (Alt+Up)"}
+            >
+              <FluentIcon name="arrow-up" size={14} />
             </button>
           </div>
 
           <div className="address-bar-wrapper">
             <span className="address-folder-icon" aria-hidden="true">
-              📁
+              <FluentIcon name="folder" size={14} />
             </span>
             {!isEditingAddress ? (
               <div
@@ -1562,7 +1697,9 @@ export default function App() {
                       >
                         {crumb.label}
                       </button>
-                      {idx < arr.length - 1 && <span className="breadcrumb-chevron">›</span>}
+                      {idx < arr.length - 1 && (
+                        <FluentIcon name="chevron-right" size={10} className="breadcrumb-chevron" />
+                      )}
                     </span>
                   ))}
                 </div>
@@ -1575,7 +1712,7 @@ export default function App() {
                   }}
                   title="Refresh (F5)"
                 >
-                  🔄
+                  <FluentIcon name="refresh" size={13} />
                 </button>
               </div>
             ) : (
@@ -1609,42 +1746,17 @@ export default function App() {
                   onClick={() => refresh()}
                   title="Refresh (F5)"
                 >
-                  🔄
+                  <FluentIcon name="refresh" size={13} />
                 </button>
               </form>
             )}
           </div>
 
           <div className="search-container">
-            <div className="search-scope-switcher">
-              <button
-                type="button"
-                className={`scope-btn ${searchScope === "folder" ? "active" : ""}`}
-                onClick={() => {
-                  setSearchScope("folder");
-                  filterInputRef.current?.focus();
-                }}
-                title="Filter items in current folder only"
-              >
-                Current Folder
-              </button>
-              <button
-                type="button"
-                className={`scope-btn ${searchScope === "indexed" ? "active" : ""}`}
-                onClick={() => {
-                  setSearchScope("indexed");
-                  if (activeTab.filterQuery && !indexedSearchQuery) {
-                    setIndexedSearchQuery(activeTab.filterQuery);
-                  }
-                  filterInputRef.current?.focus();
-                }}
-                title="Search subfolders & indexed files (SQLite FTS5)"
-              >
-                Subfolders (Indexed)
-              </button>
-            </div>
             <div className="search-input-wrapper">
-              <span className="search-icon" aria-hidden="true">🔍</span>
+              <span className="search-icon" aria-hidden="true">
+                <FluentIcon name="search" size={13} />
+              </span>
               <input
                 ref={filterInputRef}
                 type="text"
@@ -1675,13 +1787,44 @@ export default function App() {
                   type="button"
                   className="search-subfolders-quick-btn"
                   onClick={() => handleSearchSubfolders()}
-                  title="Search inside subfolders"
+                  title="Search inside subfolders (Indexed)"
                 >
-                  🔍 Subfolders
+                  <FluentIcon name="search" size={11} />
+                  <span>Subfolders</span>
+                </button>
+              )}
+              {searchScope === "folder" ? (
+                <button
+                  type="button"
+                  className="search-scope-pill"
+                  onClick={() => {
+                    setSearchScope("indexed");
+                    if (activeTab.filterQuery && !indexedSearchQuery) {
+                      setIndexedSearchQuery(activeTab.filterQuery);
+                    }
+                    filterInputRef.current?.focus();
+                  }}
+                  title="Switch to searching all subfolders"
+                >
+                  Current
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  className="search-scope-pill active"
+                  onClick={() => {
+                    setSearchScope("folder");
+                    filterInputRef.current?.focus();
+                  }}
+                  title="Switch to filtering current folder"
+                >
+                  Subfolders
                 </button>
               )}
               {searchScope === "indexed" && searchLoading && (
-                <span className="search-spinner" title="Searching...">⏳</span>
+                <span className="search-spinner" title="Searching...">
+                  <FluentIcon name="refresh" size={12} />
+                </span>
               )}
             </div>
           </div>
@@ -1696,7 +1839,9 @@ export default function App() {
             title="New Folder (Ctrl+Shift+N)"
             aria-label="New folder"
           >
-            <span className="command-icon">📁⁺</span>
+            <span className="command-icon">
+              <FluentIcon name="folder-add" size={16} />
+            </span>
             <span>New</span>
           </button>
 
@@ -1710,7 +1855,9 @@ export default function App() {
             title="Cut (Ctrl+X)"
             aria-label="Cut"
           >
-            <span className="command-icon">✂️</span>
+            <span className="command-icon">
+              <FluentIcon name="cut" size={16} />
+            </span>
             <span>Cut</span>
           </button>
 
@@ -1722,7 +1869,9 @@ export default function App() {
             title="Copy (Ctrl+C)"
             aria-label="Copy"
           >
-            <span className="command-icon">📋</span>
+            <span className="command-icon">
+              <FluentIcon name="copy" size={16} />
+            </span>
             <span>Copy</span>
           </button>
 
@@ -1733,7 +1882,9 @@ export default function App() {
             title="Paste (Ctrl+V)"
             aria-label="Paste"
           >
-            <span className="command-icon">📥</span>
+            <span className="command-icon">
+              <FluentIcon name="paste" size={16} />
+            </span>
             <span>Paste</span>
           </button>
 
@@ -1745,7 +1896,9 @@ export default function App() {
             title="Rename (F2)"
             aria-label="Rename"
           >
-            <span className="command-icon">✏️</span>
+            <span className="command-icon">
+              <FluentIcon name="rename" size={16} />
+            </span>
             <span>Rename</span>
           </button>
 
@@ -1757,7 +1910,9 @@ export default function App() {
             title="Recycle (Delete)"
             aria-label="Delete"
           >
-            <span className="command-icon">🗑️</span>
+            <span className="command-icon">
+              <FluentIcon name="delete" size={16} />
+            </span>
             <span>Delete</span>
           </button>
 
@@ -1771,7 +1926,9 @@ export default function App() {
             aria-label="Toggle hidden files"
             aria-pressed={showHiddenFiles}
           >
-            <span className="command-icon">👁️</span>
+            <span className="command-icon">
+              <FluentIcon name={showHiddenFiles ? "eye" : "eye-off"} size={16} />
+            </span>
             <span>{showHiddenFiles ? "Hidden: On" : "Hidden: Off"}</span>
           </button>
 
@@ -1786,7 +1943,9 @@ export default function App() {
             }}
             title="Toggle Background Jobs Activity"
           >
-            <span className="command-icon">⚡</span>
+            <span className="command-icon">
+              <FluentIcon name="activity" size={16} />
+            </span>
             <span>Activity</span>
             {jobs.filter((j) => j.state === "running" || j.state === "validating").length > 0 && (
               <span className="jobs-count-badge">
@@ -1803,7 +1962,10 @@ export default function App() {
             aria-label="Toggle theme"
           >
             <span className="command-icon">
-              {theme === "system" ? "💻" : theme === "dark" ? "🌙" : "☀️"}
+              <FluentIcon
+                name={theme === "system" ? "theme-system" : theme === "dark" ? "theme-moon" : "theme-sun"}
+                size={16}
+              />
             </span>
           </button>
         </div>
@@ -1827,7 +1989,9 @@ export default function App() {
                     onClick={() => navigateToPath(favPath)}
                   >
                     <div className="sidebar-fav-item">
-                      <span className="sidebar-icon">⭐</span>
+                      <span className="sidebar-icon">
+                        <FluentIcon name="star" size={16} />
+                      </span>
                       <span className="sidebar-label" title={favPath}>
                         {getTabTitle(favPath)}
                       </span>
@@ -1840,7 +2004,7 @@ export default function App() {
                         handleRemoveFavorite(favPath);
                       }}
                     >
-                      ×
+                      <FluentIcon name="close" size={10} />
                     </button>
                   </li>
                 ))}
@@ -1883,7 +2047,9 @@ export default function App() {
                     title={hasMetrics ? `${formatBytes(d.free_bytes)} free of ${formatBytes(d.total_bytes)}` : d.path}
                   >
                     <div className="sidebar-fav-item">
-                      <span className="sidebar-icon">💾</span>
+                      <span className="sidebar-icon">
+                        <FluentIcon name="drive" size={16} />
+                      </span>
                       <div className="drive-info-container">
                         <span className="sidebar-label">{d.name}</span>
                         {hasMetrics && (
@@ -1917,7 +2083,7 @@ export default function App() {
                 disabled={indexedRoots.length >= 8 || !activeTab.folderToken}
                 onClick={handleIndexCurrentFolder}
               >
-                +
+                <FluentIcon name="add" size={12} />
               </button>
             </div>
             {indexedRoots.length === 0 ? (
@@ -1953,7 +2119,7 @@ export default function App() {
                           handleRecrawlRoot(root.id);
                         }}
                       >
-                        🔄
+                        <FluentIcon name="refresh" size={12} />
                       </button>
                       <button
                         className="fav-remove-btn"
@@ -1963,7 +2129,7 @@ export default function App() {
                           handleRemoveRoot(root.id);
                         }}
                       >
-                        ×
+                        <FluentIcon name="close" size={10} />
                       </button>
                     </div>
                   </li>
@@ -1991,7 +2157,10 @@ export default function App() {
               >
                 {searchError && (
                   <div className="error-banner">
-                    <p>⚠️ {searchError}</p>
+                    <p style={{ display: "flex", alignItems: "center", gap: "6px" }}>
+                      <FluentIcon name="warning" size={14} />
+                      <span>{searchError}</span>
+                    </p>
                   </div>
                 )}
 
@@ -2009,7 +2178,8 @@ export default function App() {
                       gap: "8px",
                     }}
                   >
-                    <span>🔄</span> Indexing in progress... Results update live as files are scanned.
+                    <FluentIcon name="refresh" size={14} className="search-spinner" />
+                    <span>Indexing in progress... Results update live as files are scanned.</span>
                   </div>
                 )}
 
@@ -2020,7 +2190,10 @@ export default function App() {
                 ) : searchResults.length === 0 ? (
                   <div className="empty-state">
                     {isAnyRootScanning ? (
-                      <p>🔄 Indexing folder in progress... Matching files will appear as they are scanned.</p>
+                      <p style={{ display: "flex", alignItems: "center", gap: "6px" }}>
+                        <FluentIcon name="refresh" size={14} className="search-spinner" />
+                        <span>Indexing folder in progress... Matching files will appear as they are scanned.</span>
+                      </p>
                     ) : (
                       <p>No results found for "{indexedSearchQuery}".</p>
                     )}
@@ -2060,7 +2233,7 @@ export default function App() {
                             </span>
                           </span>
                           <span className="col col-path" title={item.path}>
-                            {item.path}
+                            <span className="col-path-text">{item.path}</span>
                           </span>
                           <span className="col col-size">
                             {formatBytes(item.size_bytes)}
@@ -2103,25 +2276,53 @@ export default function App() {
                   className={`col col-name sortable ${activeTab.sortColumn === "name" ? "sorted" : ""}`}
                   onClick={() => handleSort("name")}
                 >
-                  Name {activeTab.sortColumn === "name" && (activeTab.sortDirection === "ascending" ? "▲" : "▼")}
+                  Name{" "}
+                  {activeTab.sortColumn === "name" && (
+                    <FluentIcon
+                      name={activeTab.sortDirection === "ascending" ? "sort-asc" : "sort-desc"}
+                      size={12}
+                      className="sort-indicator"
+                    />
+                  )}
                 </span>
                 <span
                   className={`col col-type sortable ${activeTab.sortColumn === "type" ? "sorted" : ""}`}
                   onClick={() => handleSort("type")}
                 >
-                  Type {activeTab.sortColumn === "type" && (activeTab.sortDirection === "ascending" ? "▲" : "▼")}
+                  Type{" "}
+                  {activeTab.sortColumn === "type" && (
+                    <FluentIcon
+                      name={activeTab.sortDirection === "ascending" ? "sort-asc" : "sort-desc"}
+                      size={12}
+                      className="sort-indicator"
+                    />
+                  )}
                 </span>
                 <span
                   className={`col col-size sortable ${activeTab.sortColumn === "size" ? "sorted" : ""}`}
                   onClick={() => handleSort("size")}
                 >
-                  Size {activeTab.sortColumn === "size" && (activeTab.sortDirection === "ascending" ? "▲" : "▼")}
+                  Size{" "}
+                  {activeTab.sortColumn === "size" && (
+                    <FluentIcon
+                      name={activeTab.sortDirection === "ascending" ? "sort-asc" : "sort-desc"}
+                      size={12}
+                      className="sort-indicator"
+                    />
+                  )}
                 </span>
                 <span
                   className={`col col-date sortable ${activeTab.sortColumn === "modified" ? "sorted" : ""}`}
                   onClick={() => handleSort("modified")}
                 >
-                  Date modified {activeTab.sortColumn === "modified" && (activeTab.sortDirection === "ascending" ? "▲" : "▼")}
+                  Date modified{" "}
+                  {activeTab.sortColumn === "modified" && (
+                    <FluentIcon
+                      name={activeTab.sortDirection === "ascending" ? "sort-asc" : "sort-desc"}
+                      size={12}
+                      className="sort-indicator"
+                    />
+                  )}
                 </span>
               </div>
 
@@ -2132,7 +2333,10 @@ export default function App() {
               >
                 {activeTab.error && (
                   <div className="error-banner">
-                    <p>⚠️ {activeTab.error}</p>
+                    <p style={{ display: "flex", alignItems: "center", gap: "6px" }}>
+                      <FluentIcon name="warning" size={14} />
+                      <span>{activeTab.error}</span>
+                    </p>
                   </div>
                 )}
 
@@ -2154,10 +2358,14 @@ export default function App() {
                             fontSize: "13px",
                             cursor: "pointer",
                             fontWeight: 500,
+                            display: "inline-flex",
+                            alignItems: "center",
+                            gap: "6px",
                           }}
                           onClick={() => handleSearchSubfolders()}
                         >
-                          🔍 Search inside subfolders for "{activeTab.filterQuery}"
+                          <FluentIcon name="search" size={14} />
+                          <span>Search inside subfolders for "{activeTab.filterQuery}"</span>
                         </button>
                       </div>
                     ) : !showHiddenFiles && activeTab.entries.some((entry) => entry.is_hidden) ? (
@@ -2256,14 +2464,22 @@ export default function App() {
         <span className="status-spacer"></span>
         <button
           className="action-btn"
-          style={{ padding: "2px 8px", fontSize: "11px", marginRight: "8px" }}
+          style={{
+            padding: "2px 8px",
+            fontSize: "11px",
+            marginRight: "8px",
+            display: "inline-flex",
+            alignItems: "center",
+            gap: "4px",
+          }}
           onClick={() => {
             setShowJobsDrawer(!showJobsDrawer);
             refreshJobs();
           }}
           title="Toggle Jobs Drawer"
         >
-          ⚡ Jobs {jobs.length > 0 && `(${jobs.length})`}
+          <FluentIcon name="activity" size={12} />
+          <span>Jobs {jobs.length > 0 && `(${jobs.length})`}</span>
         </button>
         <span>{activeTab.path}</span>
       </footer>
@@ -2293,16 +2509,13 @@ export default function App() {
                 onClick={() => {
                   const item = contextMenu.searchResult!;
                   setContextMenu(null);
-                  const separator = Math.max(
-                    item.path_utf16.lastIndexOf(92),
-                    item.path_utf16.lastIndexOf(47)
-                  );
-                  if (separator > 0) {
-                    const driveRootSeparator =
-                      separator === 2 && item.path_utf16[1] === 58;
-                    navigateToPath(
-                      item.path_utf16.slice(0, separator + (driveRootSeparator ? 1 : 0))
-                    );
+                  const parent = getParentPath(item.path_utf16, item.path);
+                  if (parent) {
+                    if (parent.utf16) {
+                      navigateToPath(parent.utf16);
+                    } else if (parent.display) {
+                      navigateToPath(parent.display);
+                    }
                   }
                 }}
               >
@@ -2331,7 +2544,7 @@ export default function App() {
                     handleCut();
                   }}
                 >
-                  ✂️
+                  <FluentIcon name="cut" size={15} />
                 </button>
                 <button
                   type="button"
@@ -2342,7 +2555,7 @@ export default function App() {
                     handleCopy();
                   }}
                 >
-                  📋
+                  <FluentIcon name="copy" size={15} />
                 </button>
                 <button
                   type="button"
@@ -2354,7 +2567,7 @@ export default function App() {
                     openRenameModal(entry);
                   }}
                 >
-                  ✏️
+                  <FluentIcon name="rename" size={15} />
                 </button>
                 <button
                   type="button"
@@ -2366,7 +2579,7 @@ export default function App() {
                     openRecycleModal(entry);
                   }}
                 >
-                  🗑️
+                  <FluentIcon name="delete" size={15} />
                 </button>
               </div>
 
@@ -2555,8 +2768,18 @@ export default function App() {
                   />
                 )}
                 {modal.error && (
-                  <div style={{ color: "var(--error-text)", fontSize: "12px", marginTop: "8px" }}>
-                    ⚠️ {modal.error}
+                  <div
+                    style={{
+                      color: "var(--error-text)",
+                      fontSize: "12px",
+                      marginTop: "8px",
+                      display: "flex",
+                      alignItems: "center",
+                      gap: "6px",
+                    }}
+                  >
+                    <FluentIcon name="warning" size={14} />
+                    <span>{modal.error}</span>
                   </div>
                 )}
               </div>
@@ -2591,7 +2814,7 @@ export default function App() {
                 onClick={() => setShowJobsDrawer(false)}
                 title="Close"
               >
-                ×
+                <FluentIcon name="close" size={10} />
               </button>
             </div>
           </div>
@@ -2619,7 +2842,13 @@ export default function App() {
                     </span>
                   </div>
                   {job.error_message && (
-                    <div className="job-card-error">⚠️ {job.error_message}</div>
+                    <div
+                      className="job-card-error"
+                      style={{ display: "flex", alignItems: "center", gap: "6px" }}
+                    >
+                      <FluentIcon name="warning" size={14} />
+                      <span>{job.error_message}</span>
+                    </div>
                   )}
                   {job.item_outcomes.length > 0 && (
                     <details className="job-item-outcomes">
