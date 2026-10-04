@@ -51,7 +51,7 @@ temp/
 *.db-wal
 .rust-explorer-fixture*
 **/.rust-explorer-fixture*
-/docs
+docs/
 
 # Artifacts - ignore generated artifacts and reviews, but keep release deliverables and benchmark summary
 artifacts/*
