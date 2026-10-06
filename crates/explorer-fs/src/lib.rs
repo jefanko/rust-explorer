@@ -4,6 +4,7 @@
 pub mod listing;
 pub mod metadata;
 pub mod policy;
+pub mod preview;
 pub mod snapshots;
 
 use explorer_domain::errors::{ErrorCode, ExplorerError};

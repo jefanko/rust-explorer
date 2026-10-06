@@ -88,3 +88,25 @@ pub struct NavigationResponse {
     pub generation: u64,
     pub total_entries: usize,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum PreviewData {
+    Text {
+        content: String,
+        truncated: bool,
+        encoding: String,
+        line_count: usize,
+    },
+    Image {
+        mime: String,
+        data_base64: String,
+        byte_len: u64,
+    },
+    Folder {
+        item_count: Option<usize>,
+    },
+    Unsupported {
+        reason: String,
+    },
+}
