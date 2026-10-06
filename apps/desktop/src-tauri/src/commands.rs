@@ -2,7 +2,7 @@ use crate::state::AppState;
 use explorer_domain::errors::{ErrorCode, ExplorerError};
 use explorer_domain::ids::{FolderToken, ItemToken, SessionId};
 use explorer_domain::models::{
-    BootstrapData, DirectoryPage, NavigationResponse, SortColumn, SortDirection,
+    BootstrapData, DirectoryPage, NavigationResponse, PreviewData, SortColumn, SortDirection,
 };
 use explorer_domain::operations::{JobSummary, OperationPlan};
 use explorer_store::AppSettings;
@@ -405,6 +405,110 @@ pub async fn plan_recycle(
     let operation_service = state.operation_service.clone();
     run_blocking("plan_recycle", move || {
         operation_service.plan_recycle(&sources)
+    })
+    .await
+}
+
+/// Resolves the tokens of a drag & drop request into native paths.
+/// The destination is a folder row (`destination_item_token`) inside the destination folder,
+/// or the destination folder itself when no item token is supplied.
+fn resolve_transfer_paths(
+    folder_service: &explorer_fs::FolderService,
+    source_folder_token: &FolderToken,
+    item_tokens: &[ItemToken],
+    destination_folder_token: &FolderToken,
+    destination_item_token: Option<&ItemToken>,
+) -> Result<(Vec<PathBuf>, PathBuf), ExplorerError> {
+    const OP: &str = "plan_transfer";
+    if item_tokens.is_empty() {
+        return Err(ExplorerError::new(
+            ErrorCode::UnsupportedPath,
+            "No items selected to drop",
+            OP,
+        ));
+    }
+    let sources = item_tokens
+        .iter()
+        .map(|token| {
+            folder_service
+                .resolve_item(source_folder_token, token)
+                .ok_or_else(|| {
+                    ExplorerError::new(ErrorCode::StaleItem, "Selected item token expired", OP)
+                })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let destination = match destination_item_token {
+        Some(token) => {
+            let path = folder_service
+                .resolve_item(destination_folder_token, token)
+                .ok_or_else(|| {
+                    ExplorerError::new(ErrorCode::StaleItem, "Drop target token expired", OP)
+                })?;
+            if !path.is_dir() {
+                return Err(ExplorerError::new(
+                    ErrorCode::UnsupportedPath,
+                    "Drop target is not a folder",
+                    OP,
+                ));
+            }
+            path
+        }
+        None => folder_service
+            .get_folder_path(destination_folder_token)
+            .ok_or_else(|| {
+                ExplorerError::new(ErrorCode::StaleItem, "Destination folder token expired", OP)
+            })?,
+    };
+    Ok((sources, destination))
+}
+
+#[tauri::command]
+pub async fn plan_transfer(
+    source_folder_token: FolderToken,
+    item_tokens: Vec<ItemToken>,
+    destination_folder_token: FolderToken,
+    destination_item_token: Option<ItemToken>,
+    is_move: bool,
+    state: State<'_, AppState>,
+) -> Result<OperationPlan, ExplorerError> {
+    let folder_service = state.folder_service.clone();
+    let operation_service = state.operation_service.clone();
+    run_blocking("plan_transfer", move || {
+        let (sources, destination) = resolve_transfer_paths(
+            &folder_service,
+            &source_folder_token,
+            &item_tokens,
+            &destination_folder_token,
+            destination_item_token.as_ref(),
+        )?;
+        explorer_jobs::planner::validate_drop_request(&sources, &destination, is_move)?;
+        if is_move {
+            operation_service.plan_move(&sources, &destination)
+        } else {
+            operation_service.plan_copy(&sources, &destination)
+        }
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn read_preview(
+    folder_token: FolderToken,
+    item_token: ItemToken,
+    state: State<'_, AppState>,
+) -> Result<PreviewData, ExplorerError> {
+    let path = state
+        .folder_service
+        .resolve_item(&folder_token, &item_token)
+        .ok_or_else(|| {
+            ExplorerError::new(
+                ErrorCode::StaleItem,
+                "Selected item token expired",
+                "read_preview",
+            )
+        })?;
+    run_blocking("read_preview", move || {
+        Ok(explorer_fs::preview::build_preview(&path))
     })
     .await
 }

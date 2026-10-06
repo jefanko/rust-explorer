@@ -84,7 +84,6 @@ pub fn run() {
     let window_lease = instance_lease.clone();
 
     tauri::Builder::default()
-        .plugin(tauri_plugin_shell::init())
         .manage(app_state)
         .setup(move |app| {
             let window = app.get_webview_window("main").ok_or("Main window is missing")?;
@@ -217,6 +216,8 @@ pub fn run() {
             commands::plan_rename,
             commands::plan_paste,
             commands::plan_recycle,
+            commands::plan_transfer,
+            commands::read_preview,
             commands::commit_plan,
             commands::create_folder,
             commands::rename_item,

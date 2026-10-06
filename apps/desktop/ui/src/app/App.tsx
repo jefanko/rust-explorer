@@ -1,7 +1,7 @@
-import { useEffect, useRef, useState, useMemo } from "react";
+import React, { useEffect, useRef, useState, useMemo } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { client } from "../bridge/client";
-import {
+import type {
   DriveItem,
   AppSettings,
   FileEntry,
@@ -11,367 +11,48 @@ import {
   SortDirection,
   IndexedRoot,
   SearchResultItem,
+  PreviewData,
 } from "../bridge/types";
+import { formatBytes, formatFiletime } from "../lib/format";
+import { matchFilterQuery } from "../lib/filter";
 import {
-  FluentIcon,
-  getFluentFileIcon,
-  getFluentKnownFolderIcon,
-} from "./FluentIcon";
+  getTabTitle,
+  getParentPath,
+  sameWindowsPath,
+} from "../lib/paths";
+import { moveSelection, nextFocusIndex } from "../lib/selection";
+import { validateIndexedQuery } from "../lib/searchQuery";
+import { recycleDialogText } from "../lib/recycle";
+import { TabState, createInitialTab } from "../state/tabs";
+import type { ContextMenuState, ModalState, ThemeMode } from "./types";
+import { FluentIcon } from "../components/FluentIcon";
+import { getFileIcon } from "../components/icons";
+import { TabBar } from "../components/TabBar";
+import { NavToolbar } from "../components/NavToolbar";
+import { CommandBar } from "../components/CommandBar";
+import { Sidebar } from "../components/Sidebar";
+import { StatusBar } from "../components/StatusBar";
+import { ContextMenu } from "../components/ContextMenu";
+import { ModalDialog } from "../components/ModalDialog";
+import { JobsDrawer } from "../components/JobsDrawer";
+import { PreviewPane } from "../components/PreviewPane";
 
-function formatBytes(bytes?: number | null): string {
-  if (bytes === null || bytes === undefined) return "";
-  if (bytes === 0) return "0 B";
-  const k = 1024;
-  const sizes = ["B", "KB", "MB", "GB", "TB"];
-  const i = Math.floor(Math.log(bytes) / Math.log(k));
-  return `${parseFloat((bytes / Math.pow(k, i)).toFixed(1))} ${sizes[i]}`;
-}
-
-function formatFiletime(filetime?: number | null): string {
-  if (!filetime) return "";
-  const unixMs = (filetime - 116444736000000000) / 10000;
-  if (unixMs <= 0) return "";
-  const date = new Date(unixMs);
-  return date.toLocaleDateString(undefined, {
-    year: "numeric",
-    month: "short",
-    day: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-  });
-}
-
-function getFileIcon(entry: { kind: string; extension: string }) {
-  return <FluentIcon name={getFluentFileIcon(entry)} size={16} />;
-}
-
-function getTabTitle(path: string): string {
-  if (!path) return "New Tab";
-  const trimmed = path.replace(/[\\/]+$/, "");
-  const parts = trimmed.split(/[\\/]/);
-  return parts.pop() || path || "PC";
-}
-
-export function matchFilterQuery(
-  entry: { display_name: string; extension: string; kind: string },
-  filterQuery: string
-): boolean {
-  const q = filterQuery.trim().toLowerCase();
-  if (!q) return true;
-
-  // Direct extension filter like *.exe or *.pdf
-  if (q.startsWith("*.")) {
-    const ext = q.slice(2).trim();
-    if (ext && ext !== "*") {
-      return (
-        entry.extension.toLowerCase() === ext ||
-        entry.display_name.toLowerCase().endsWith("." + ext)
-      );
-    }
-  }
-
-  // Direct dot-extension filter like .exe or .pdf
-  if (
-    q.startsWith(".") &&
-    q.length > 1 &&
-    !q.slice(1).includes(".") &&
-    !q.includes(" ") &&
-    !q.includes(":") &&
-    !q.includes("/") &&
-    !q.includes("\\")
-  ) {
-    const ext = q.slice(1);
-    return (
-      entry.extension.toLowerCase() === ext ||
-      entry.display_name.toLowerCase().endsWith("." + ext) ||
-      entry.display_name.toLowerCase().includes(q)
-    );
-  }
-
-  // ext: filter
-  if (q.startsWith("ext:")) {
-    const ext = q.slice(4).trim().replace(/^\./, "");
-    return entry.extension.toLowerCase() === ext;
-  }
-
-  // type: filter
-  if (q.startsWith("type:")) {
-    const type = q.slice(5).trim();
-    if (type === "folder" || type === "dir" || type === "directory") {
-      return entry.kind === "directory";
-    }
-    if (type === "file") {
-      return entry.kind === "file";
-    }
-  }
-
-  // Wildcard glob if contains * or ?
-  if (q.includes("*") || q.includes("?")) {
-    const regexPattern =
-      "^" +
-      q
-        .replace(/[-/\\^$+.,{}[\]()]/g, "\\$&")
-        .replace(/\*/g, ".*")
-        .replace(/\?/g, ".") +
-      "$";
-    try {
-      const re = new RegExp(regexPattern, "i");
-      return re.test(entry.display_name);
-    } catch {
-      // Fall back to substring match below
-    }
-  }
-
-  return entry.display_name.toLowerCase().includes(q);
-}
-
-export function getBreadcrumbs(path: string): { label: string; fullPath: string }[] {
-  if (!path) return [];
-  const parts = path.split(/[\\/]/).filter(Boolean);
-  const crumbs: { label: string; fullPath: string }[] = [];
-  let accumulated = "";
-
-  for (let i = 0; i < parts.length; i++) {
-    const part = parts[i];
-    if (i === 0 && part.includes(":")) {
-      accumulated = `${part}\\`;
-    } else {
-      accumulated = accumulated.endsWith("\\")
-        ? `${accumulated}${part}`
-        : `${accumulated}\\${part}`;
-    }
-    crumbs.push({ label: part, fullPath: accumulated });
-  }
-  return crumbs;
-}
-
-export function getParentPathUtf16(units: number[]): number[] | null {
-  if (!units || units.length === 0) return null;
-
-  // Trim any trailing slashes (e.g. D:\foo\ -> D:\foo)
-  let end = units.length;
-  while (end > 0 && (units[end - 1] === 92 || units[end - 1] === 47)) {
-    end--;
-  }
-  if (end === 0) return null;
-
-  const isLetter = (u: number) => (u >= 65 && u <= 90) || (u >= 97 && u <= 122);
-
-  // Check for extended prefix: \\?\
-  const isExtended =
-    end >= 4 &&
-    units[0] === 92 &&
-    units[1] === 92 &&
-    units[2] === 63 &&
-    units[3] === 92;
-
-  // Check for device prefix: \\.\
-  const isDevice =
-    end >= 4 &&
-    units[0] === 92 &&
-    units[1] === 92 &&
-    units[2] === 46 &&
-    units[3] === 92;
-
-  // Check for \\?\UNC\
-  const isExtendedUnc =
-    isExtended &&
-    end >= 8 &&
-    (units[4] === 85 || units[4] === 117) &&
-    (units[5] === 78 || units[5] === 110) &&
-    (units[6] === 67 || units[6] === 99) &&
-    units[7] === 92;
-
-  // 1. Extended or Device Drive Root: \\?\C: or \\.\C:
-  if ((isExtended || isDevice) && !isExtendedUnc && end >= 6 && isLetter(units[4]) && units[5] === 58) {
-    if (end === 6) return null; // Already at \\?\C: (root)
-    const lastSep = Math.max(
-      units.slice(0, end).lastIndexOf(92),
-      units.slice(0, end).lastIndexOf(47)
-    );
-    if (lastSep < 6) return null;
-    // If last separator is index 6 (right after C:), parent is the drive root WITH trailing slash (\\?\C:\)
-    if (lastSep === 6) {
-      return units.slice(0, 7);
-    }
-    return units.slice(0, lastSep);
-  }
-
-  // 2. Standard DOS Drive Root: C:
-  if (end >= 2 && isLetter(units[0]) && units[1] === 58) {
-    if (end === 2) return null; // Already at C: (root)
-    const lastSep = Math.max(
-      units.slice(0, end).lastIndexOf(92),
-      units.slice(0, end).lastIndexOf(47)
-    );
-    if (lastSep < 2) return null;
-    // If last separator is index 2 (right after C:), parent is the drive root WITH trailing slash (C:\)
-    if (lastSep === 2) {
-      return units.slice(0, 3);
-    }
-    return units.slice(0, lastSep);
-  }
-
-  // 3. Extended UNC: \\?\UNC\server\share\...
-  if (isExtendedUnc) {
-    const serverSlash = units.slice(8, end).indexOf(92);
-    if (serverSlash < 0) return null;
-    const shareStart = 8 + serverSlash + 1;
-    const shareSlash = units.slice(shareStart, end).indexOf(92);
-    if (shareSlash < 0) return null; // At share root: \\?\UNC\server\share
-    const shareEnd = shareStart + shareSlash;
-    const lastSep = Math.max(
-      units.slice(0, end).lastIndexOf(92),
-      units.slice(0, end).lastIndexOf(47)
-    );
-    if (lastSep <= shareEnd) {
-      return units.slice(0, shareEnd);
-    }
-    return units.slice(0, lastSep);
-  }
-
-  // 4. Standard UNC: \\server\share\...
-  if (end >= 2 && units[0] === 92 && units[1] === 92) {
-    const serverSlash = units.slice(2, end).indexOf(92);
-    if (serverSlash < 0) return null;
-    const shareStart = 2 + serverSlash + 1;
-    const shareSlash = units.slice(shareStart, end).indexOf(92);
-    if (shareSlash < 0) return null; // At share root: \\server\share
-    const shareEnd = shareStart + shareSlash;
-    const lastSep = Math.max(
-      units.slice(0, end).lastIndexOf(92),
-      units.slice(0, end).lastIndexOf(47)
-    );
-    if (lastSep <= shareEnd) {
-      return units.slice(0, shareEnd);
-    }
-    return units.slice(0, lastSep);
-  }
-
-  // 5. Generic or relative path
-  const lastSep = Math.max(
-    units.slice(0, end).lastIndexOf(92),
-    units.slice(0, end).lastIndexOf(47)
-  );
-  if (lastSep <= 0) return null;
-  return units.slice(0, lastSep);
-}
-
-export function getParentPathString(path: string): string | null {
-  if (!path) return null;
-  const codes = Array.from(path).map((c) => c.charCodeAt(0));
-  const parentCodes = getParentPathUtf16(codes);
-  if (!parentCodes) return null;
-  return String.fromCharCode(...parentCodes);
-}
-
-export function getParentPath(
-  nativeUnits?: number[],
-  displayPath?: string
-): { utf16?: number[]; display?: string } | null {
-  if (nativeUnits && nativeUnits.length > 0) {
-    const parentUnits = getParentPathUtf16(nativeUnits);
-    if (parentUnits) {
-      return { utf16: parentUnits };
-    }
-  }
-  if (displayPath && displayPath.length > 0) {
-    const parentStr = getParentPathString(displayPath);
-    if (parentStr) {
-      return { display: parentStr };
-    }
-  }
-  return null;
-}
-
-function getKnownFolderIcon(name: string) {
-  return <FluentIcon name={getFluentKnownFolderIcon(name)} size={16} />;
-}
-
-function sameWindowsPath(left: number[], right: number[]): boolean {
-  if (left.length !== right.length) return false;
-  for (let index = 0; index < left.length; index += 1) {
-    const normalize = (unit: number) => (unit >= 65 && unit <= 90 ? unit + 32 : unit);
-    if (normalize(left[index]) !== normalize(right[index])) return false;
-  }
-  return true;
-}
-
-interface TabState {
-  id: string;
-  title: string;
-  path: string;
-  addressInput: string;
-  folderToken: string;
-  nativePathUtf16: number[];
-  generation: number;
-  entries: FileEntry[];
-  totalEntries: number;
-  loading: boolean;
-  error: string | null;
-  history: TabLocation[];
-  historyIndex: number;
-  sortColumn: SortColumn;
-  sortDirection: SortDirection;
-  selectedTokens: Set<string>;
-  focusedIndex: number;
-  anchorIndex: number;
-  scrollTop: number;
-  filterQuery: string;
-}
-
-interface ContextMenuState {
-  x: number;
-  y: number;
-  entry?: FileEntry;
-  searchResult?: SearchResultItem;
-}
-
-interface ModalState {
-  type: "create_folder" | "rename" | "recycle";
-  title: string;
-  value: string;
-  folderToken: string;
-  itemToken?: string;
-  targetTokens?: string[];
-  error?: string | null;
-}
-
-interface TabLocation {
-  pathDisplay: string;
-  pathUtf16: number[];
-}
-
-function createInitialTab(id = "tab_1", initialPath = ""): TabState {
-  return {
-    id,
-    title: getTabTitle(initialPath),
-    path: initialPath,
-    addressInput: initialPath,
-    folderToken: "",
-    nativePathUtf16: [],
-    generation: 0,
-    entries: [],
-    totalEntries: 0,
-    loading: true,
-    error: null,
-    history: initialPath ? [{ pathDisplay: initialPath, pathUtf16: [] }] : [],
-    historyIndex: initialPath ? 0 : -1,
-    sortColumn: "name",
-    sortDirection: "ascending",
-    selectedTokens: new Set(),
-    focusedIndex: -1,
-    anchorIndex: -1,
-    scrollTop: 0,
-    filterQuery: "",
-  };
-}
+// Re-export pure helpers for backwards compatibility
+export {
+  matchFilterQuery,
+} from "../lib/filter";
+export {
+  getBreadcrumbs,
+  getParentPathUtf16,
+  getParentPathString,
+  getParentPath,
+} from "../lib/paths";
 
 export default function App() {
   const [knownFolders, setKnownFolders] = useState<KnownFolderItem[]>([]);
   const [drives, setDrives] = useState<DriveItem[]>([]);
   const [favorites, setFavorites] = useState<string[]>([]);
-  const [theme, setTheme] = useState<"system" | "light" | "dark">("system");
+  const [theme, setTheme] = useState<ThemeMode>("system");
   const [showHiddenFiles, setShowHiddenFiles] = useState<boolean>(false);
   const settingsWriteQueue = useRef<Promise<void>>(Promise.resolve());
 
@@ -400,6 +81,17 @@ export default function App() {
 
   // Indexed roots state
   const [indexedRoots, setIndexedRoots] = useState<IndexedRoot[]>([]);
+
+  // Preview Pane state
+  const [showPreviewPane, setShowPreviewPane] = useState<boolean>(false);
+  const [previewData, setPreviewData] = useState<PreviewData | null>(null);
+  const [previewLoading, setPreviewLoading] = useState<boolean>(false);
+  const [previewError, setPreviewError] = useState<string | null>(null);
+
+  // Drag and drop state
+  const [draggedTokens, setDraggedTokens] = useState<string[]>([]);
+  const [dragSourceFolderToken, setDragSourceFolderToken] = useState<string>("");
+  const [dropTargetToken, setDropTargetToken] = useState<string | null>(null);
 
   // Refs for element focus and callbacks
   const addressInputRef = useRef<HTMLInputElement>(null);
@@ -457,6 +149,46 @@ export default function App() {
     [activeTab.entries, showHiddenFiles]
   );
 
+  // Single selected entry for preview pane
+  const selectedEntry = useMemo(() => {
+    if (activeTab.selectedTokens.size !== 1) return null;
+    const token = Array.from(activeTab.selectedTokens)[0];
+    return displayedEntries.find((e) => e.token === token) || null;
+  }, [activeTab.selectedTokens, displayedEntries]);
+
+  // Load preview data whenever selected entry changes and preview is enabled
+  useEffect(() => {
+    if (!showPreviewPane || !selectedEntry || !activeTab.folderToken) {
+      setPreviewData(null);
+      setPreviewLoading(false);
+      setPreviewError(null);
+      return;
+    }
+
+    let canceled = false;
+    setPreviewLoading(true);
+    setPreviewError(null);
+
+    client
+      .readPreview(activeTab.folderToken, selectedEntry.token)
+      .then((data) => {
+        if (!canceled) {
+          setPreviewData(data);
+          setPreviewLoading(false);
+        }
+      })
+      .catch((err: any) => {
+        if (!canceled) {
+          setPreviewError(err?.user_message || "Failed to load preview");
+          setPreviewLoading(false);
+        }
+      });
+
+    return () => {
+      canceled = true;
+    };
+  }, [showPreviewPane, selectedEntry?.token, activeTab.folderToken]);
+
   const rowVirtualizer = useVirtualizer({
     count: displayedEntries.length,
     getScrollElement: () => parentRef.current,
@@ -474,7 +206,7 @@ export default function App() {
   });
 
   // Apply theme to document
-  function applyTheme(t: "system" | "light" | "dark") {
+  function applyTheme(t: ThemeMode) {
     if (t === "system") {
       document.documentElement.removeAttribute("data-theme");
     } else {
@@ -483,7 +215,7 @@ export default function App() {
   }
 
   function toggleTheme() {
-    const nextTheme: "system" | "light" | "dark" =
+    const nextTheme: ThemeMode =
       theme === "system" ? "light" : theme === "light" ? "dark" : "system";
     setTheme(nextTheme);
     applyTheme(nextTheme);
@@ -616,7 +348,6 @@ export default function App() {
         };
       });
 
-      // Update watch subscriptions
       try {
         await client.unwatchAll(targetTabId);
         if (navigationRequests.current.get(targetTabId) === requestId) {
@@ -673,7 +404,6 @@ export default function App() {
     const q = (overrideQuery ?? (searchScope === "folder" ? activeTab.filterQuery : indexedSearchQuery)).trim();
     if (!q) return;
 
-    // Check if current folder or a parent folder is already covered by an indexed root
     const normalizedActivePath = activeTab.path.toLowerCase().replace(/[\\/]+$/, "");
     const matchingRoot = indexedRoots.find((r) => {
       const rPath = r.display_path.toLowerCase().replace(/[\\/]+$/, "");
@@ -697,20 +427,29 @@ export default function App() {
   }
 
   async function handleRemoveRoot(rootId: string) {
+    const prev = indexedRoots;
+    setIndexedRoots((curr) => curr.filter((r) => r.id !== rootId));
     try {
       await client.removeIndexedRoot(rootId);
       await loadIndexedRoots();
     } catch (err: any) {
       console.error("Failed to remove indexed root:", err);
+      setIndexedRoots(prev);
+      alert(err?.user_message || err?.message || "Failed to remove indexed root");
     }
   }
 
   async function handleRecrawlRoot(rootId: string) {
+    setIndexedRoots((curr) =>
+      curr.map((r) => (r.id === rootId ? { ...r, state: "scanning" as const } : r))
+    );
     try {
       await client.recrawlIndexedRoot(rootId);
       await loadIndexedRoots();
     } catch (err: any) {
       console.error("Failed to recrawl indexed root:", err);
+      await loadIndexedRoots();
+      alert(err?.user_message || err?.message || "Failed to recrawl indexed root");
     }
   }
 
@@ -741,14 +480,13 @@ export default function App() {
 
   const isAnyRootScanning = indexedRoots.some((r) => r.state === "scanning");
 
-  // Poll for status updates if any indexed root is scanning
   useEffect(() => {
     if (!isAnyRootScanning) return;
     const interval = setInterval(loadIndexedRoots, 1200);
     return () => clearInterval(interval);
   }, [isAnyRootScanning]);
 
-  // Debounced indexed search with query validation and cancellation
+  // Debounced indexed search with query validation
   useEffect(() => {
     if (searchScope !== "indexed") return;
     const q = indexedSearchQuery.trim();
@@ -762,14 +500,13 @@ export default function App() {
       return;
     }
 
-    const hasMetadataFilter = /(?:ext:|\*\.|\.)[a-z0-9_-]+|type:(?:folder|file)/i.test(q);
-    const textWithoutFilters = q.replace(/(?:ext:|\*\.|\.)[a-z0-9_-]+|type:[^\s]+/gi, "").trim();
-    if (!hasMetadataFilter && textWithoutFilters.length < 3) {
+    const validation = validateIndexedQuery(q);
+    if (!validation.valid) {
       setSearchResults([]);
       setSearchTotalMatches(0);
       setSearchIsCapped(false);
       setSearchLoading(false);
-      setSearchError("Use at least 3 characters for indexed search");
+      setSearchError(validation.error || null);
       setSelectedSearchIndex(-1);
       return;
     }
@@ -844,7 +581,7 @@ export default function App() {
     };
   }, []);
 
-  // Save tabs for restoration when tabs or active tab path changes
+  // Save tabs for restoration
   useEffect(() => {
     const paths = tabs.map((t) => t.path).filter(Boolean);
     if (paths.length > 0) {
@@ -854,7 +591,7 @@ export default function App() {
     }
   }, [tabs]);
 
-  // Listen for live filesystem notifications and reconcile affected tab views
+  // Listen for live filesystem notifications
   useEffect(() => {
     let unlisten: (() => void) | undefined;
 
@@ -1039,19 +776,19 @@ export default function App() {
             title: getTabTitle(nav.path_display),
             history: newHist,
             historyIndex: nextIndex,
-          filterQuery: "",
-        };
-      });
-      try {
-        await client.unwatchAll(cur.id);
-        if (navigationRequests.current.get(cur.id) === requestId) {
-          await client.watchFolder(nav.folder_token, cur.id);
+            filterQuery: "",
+          };
+        });
+        try {
+          await client.unwatchAll(cur.id);
+          if (navigationRequests.current.get(cur.id) === requestId) {
+            await client.watchFolder(nav.folder_token, cur.id);
+          }
+        } catch {
+          // Keep navigation usable if watch registration is temporarily unavailable.
         }
-      } catch {
-        // Keep navigation usable if watch registration is temporarily unavailable.
-      }
-      if (navigationRequests.current.get(cur.id) !== requestId) return;
-      await loadDirectory(nav.folder_token, nav.generation, cur.id);
+        if (navigationRequests.current.get(cur.id) !== requestId) return;
+        await loadDirectory(nav.folder_token, nav.generation, cur.id);
       }
     } catch (err: any) {
       if (navigationRequests.current.get(cur.id) !== requestId) return;
@@ -1061,7 +798,7 @@ export default function App() {
     }
   }
 
-  // Row selection handlers
+  // Row selection handler
   function handleRowClick(entry: FileEntry, index: number, e: React.MouseEvent) {
     const cur = activeTabRef.current;
     if (e.ctrlKey) {
@@ -1074,19 +811,10 @@ export default function App() {
         anchorIndex: index,
       });
     } else if (e.shiftKey) {
-      const anchor = cur.anchorIndex >= 0 ? cur.anchorIndex : 0;
-      const start = Math.min(anchor, index);
-      const end = Math.max(anchor, index);
-      const next = new Set<string>();
-      for (let i = start; i <= end; i++) {
-        if (displayedEntries[i]) {
-          next.add(displayedEntries[i].token);
-        }
+      const move = moveSelection(displayedEntries, cur.anchorIndex, index, true);
+      if (move) {
+        updateActiveTab(move);
       }
-      updateActiveTab({
-        selectedTokens: next,
-        focusedIndex: index,
-      });
     } else {
       updateActiveTab({
         selectedTokens: new Set([entry.token]),
@@ -1100,63 +828,22 @@ export default function App() {
   function navigateRow(delta: number, isShift: boolean) {
     if (displayedEntries.length === 0) return;
     const cur = activeTabRef.current;
-    let next = cur.focusedIndex + delta;
-    if (cur.focusedIndex === -1) {
-      next = delta > 0 ? 0 : displayedEntries.length - 1;
+    const target = nextFocusIndex(cur.focusedIndex, delta, displayedEntries.length);
+    const move = moveSelection(displayedEntries, cur.anchorIndex, target, isShift);
+    if (move) {
+      updateActiveTab(move);
+      rowVirtualizer.scrollToIndex(move.focusedIndex, { align: "auto" });
     }
-    next = Math.max(0, Math.min(displayedEntries.length - 1, next));
-    const anchor = cur.anchorIndex >= 0 ? cur.anchorIndex : next;
-
-    if (isShift) {
-      const start = Math.min(anchor, next);
-      const end = Math.max(anchor, next);
-      const newSelected = new Set<string>();
-      for (let i = start; i <= end; i++) {
-        newSelected.add(displayedEntries[i].token);
-      }
-      updateActiveTab({
-        focusedIndex: next,
-        anchorIndex: anchor,
-        selectedTokens: newSelected,
-      });
-    } else {
-      updateActiveTab({
-        focusedIndex: next,
-        anchorIndex: next,
-        selectedTokens: new Set([displayedEntries[next].token]),
-      });
-    }
-
-    rowVirtualizer.scrollToIndex(next, { align: "auto" });
   }
 
   function jumpToRow(index: number, isShift: boolean) {
     if (displayedEntries.length === 0) return;
     const cur = activeTabRef.current;
-    const target = Math.max(0, Math.min(displayedEntries.length - 1, index));
-    const anchor = cur.anchorIndex >= 0 ? cur.anchorIndex : target;
-
-    if (isShift) {
-      const start = Math.min(anchor, target);
-      const end = Math.max(anchor, target);
-      const newSelected = new Set<string>();
-      for (let i = start; i <= end; i++) {
-        newSelected.add(displayedEntries[i].token);
-      }
-      updateActiveTab({
-        focusedIndex: target,
-        anchorIndex: anchor,
-        selectedTokens: newSelected,
-      });
-    } else {
-      updateActiveTab({
-        focusedIndex: target,
-        anchorIndex: target,
-        selectedTokens: new Set([displayedEntries[target].token]),
-      });
+    const move = moveSelection(displayedEntries, cur.anchorIndex, index, isShift);
+    if (move) {
+      updateActiveTab(move);
+      rowVirtualizer.scrollToIndex(move.focusedIndex, { align: "auto" });
     }
-
-    rowVirtualizer.scrollToIndex(target, { align: "auto" });
   }
 
   function selectAll() {
@@ -1234,16 +921,11 @@ export default function App() {
     if (targetEntries.length === 0) return;
 
     setContextMenu(null);
+    const dialogInfo = recycleDialogText(targetEntries.map((e) => e.display_name));
     setModal({
       type: "recycle",
-      title:
-        targetEntries.length === 1
-          ? `Recycle "${targetEntries[0].display_name}"?`
-          : `Recycle ${targetEntries.length} items?`,
-      value:
-        targetEntries.length === 1
-          ? targetEntries[0].display_name
-          : `${targetEntries.length} items`,
+      title: dialogInfo.title,
+      value: dialogInfo.value,
       folderToken: activeTab.folderToken || "",
       targetTokens: targetEntries.map((entry) => entry.token),
     });
@@ -1291,6 +973,34 @@ export default function App() {
     } catch (err: any) {
       refreshJobs();
       alert(err?.user_message || "Paste operation failed");
+    }
+  }
+
+  // Drag and Drop operation handler
+  async function handleTransfer(
+    destinationFolderToken: string,
+    destinationItemToken: string | null = null,
+    isMove = true
+  ) {
+    if (!dragSourceFolderToken || draggedTokens.length === 0) return;
+    try {
+      const plan = await client.planTransfer(
+        dragSourceFolderToken,
+        draggedTokens,
+        destinationFolderToken,
+        destinationItemToken,
+        isMove
+      );
+      showJobResult(await client.commitPlan(plan.id));
+      refresh();
+      refreshJobs();
+    } catch (err: any) {
+      refreshJobs();
+      alert(err?.user_message || "Transfer operation failed");
+    } finally {
+      setDraggedTokens([]);
+      setDragSourceFolderToken("");
+      setDropTargetToken(null);
     }
   }
 
@@ -1364,7 +1074,6 @@ export default function App() {
   // Global Keyboard shortcuts
   useEffect(() => {
     function handleKeyDown(e: KeyboardEvent) {
-      // Escape -> Dismiss modal, context menu, drawer, or clear selection
       if (e.key === "Escape") {
         if (modal) {
           setModal(null);
@@ -1389,7 +1098,6 @@ export default function App() {
         return;
       }
 
-      // If modal is active, enter submits
       if (modal) {
         if (e.key === "Enter") {
           e.preventDefault();
@@ -1413,6 +1121,13 @@ export default function App() {
       if (e.key === "F2" && !isInputActive) {
         e.preventDefault();
         openRenameModal();
+        return;
+      }
+
+      // Ctrl+P / Alt+P -> Toggle Preview Pane
+      if ((e.ctrlKey && (e.key === "p" || e.key === "P")) || (e.altKey && (e.key === "p" || e.key === "P"))) {
+        e.preventDefault();
+        setShowPreviewPane((prev) => !prev);
         return;
       }
 
@@ -1476,7 +1191,6 @@ export default function App() {
         return;
       }
 
-      // Keys that must NOT trigger table navigation while typing in inputs
       if (isInputActive) return;
 
       // Ctrl+C -> Copy
@@ -1601,546 +1315,93 @@ export default function App() {
     <div className="app-container" onContextMenu={handleBackgroundContextMenu}>
       {/* Tab bar, Navigation Toolbar, and Command Bar */}
       <header className="app-header">
-        <div className="tab-bar" role="tablist">
-          {tabs.map((tab, idx) => (
-            <div
-              key={tab.id}
-              className={`tab-item ${idx === activeTabIndex ? "active" : ""}`}
-              role="tab"
-              aria-selected={idx === activeTabIndex}
-              onClick={() => switchTab(idx)}
-              title={tab.path}
-            >
-              <span className="file-icon" style={{ fontSize: "14px" }}>
-                <FluentIcon name="folder" size={14} />
-              </span>
-              <span className="tab-title">{tab.title}</span>
-              <button
-                className="tab-close-btn"
-                aria-label="Close tab"
-                title="Close Tab (Ctrl+W)"
-                onClick={(e) => closeTab(idx, e)}
-              >
-                <FluentIcon name="close" size={10} />
-              </button>
-            </div>
-          ))}
-          <button
-            className="new-tab-btn"
-            aria-label="New tab"
-            title="New Tab (Ctrl+T)"
-            onClick={() => createNewTab()}
-          >
-            <FluentIcon name="add" size={13} />
-          </button>
-        </div>
+        <TabBar
+          tabs={tabs}
+          activeTabIndex={activeTabIndex}
+          onSwitchTab={switchTab}
+          onCloseTab={closeTab}
+          onNewTab={() => createNewTab()}
+        />
 
-        {/* Row 1: Nav Buttons, Address Bar (Breadcrumbs), Search Box */}
-        <div className="nav-toolbar">
-          <div className="nav-buttons">
-            <button
-              className="nav-btn"
-              onClick={goBack}
-              disabled={activeTab.historyIndex <= 0}
-              aria-label="Back"
-              title="Back (Alt+Left)"
-            >
-              <FluentIcon name="arrow-left" size={14} />
-            </button>
-            <button
-              className="nav-btn"
-              onClick={goForward}
-              disabled={activeTab.historyIndex >= activeTab.history.length - 1}
-              aria-label="Forward"
-              title="Forward (Alt+Right)"
-            >
-              <FluentIcon name="arrow-right" size={14} />
-            </button>
-            <button
-              className="nav-btn"
-              onClick={goUp}
-              disabled={!canGoUp}
-              aria-label="Up"
-              title={canGoUp ? "Up to Parent (Alt+Up)" : "At root (Alt+Up)"}
-            >
-              <FluentIcon name="arrow-up" size={14} />
-            </button>
-          </div>
+        <NavToolbar
+          activeTab={activeTab}
+          canGoUp={canGoUp}
+          onGoBack={goBack}
+          onGoForward={goForward}
+          onGoUp={goUp}
+          onNavigate={(path) => navigateToPath(path)}
+          onRefresh={refresh}
+          isEditingAddress={isEditingAddress}
+          setIsEditingAddress={setIsEditingAddress}
+          addressInputRef={addressInputRef}
+          filterInputRef={filterInputRef}
+          onAddressInputChange={(val) => updateActiveTab({ addressInput: val })}
+          searchScope={searchScope}
+          onSetSearchScope={setSearchScope}
+          indexedSearchQuery={indexedSearchQuery}
+          onIndexedSearchQueryChange={setIndexedSearchQuery}
+          onFilterQueryChange={(val) => updateActiveTab({ filterQuery: val })}
+          onSearchSubfolders={handleSearchSubfolders}
+          searchLoading={searchLoading}
+        />
 
-          <div className="address-bar-wrapper">
-            <span className="address-folder-icon" aria-hidden="true">
-              <FluentIcon name="folder" size={14} />
-            </span>
-            {!isEditingAddress ? (
-              <div
-                className="address-breadcrumbs-container"
-                onClick={() => {
-                  setIsEditingAddress(true);
-                  setTimeout(() => {
-                    addressInputRef.current?.focus();
-                    addressInputRef.current?.select();
-                  }, 50);
-                }}
-                title="Click to edit path (Ctrl+L / Alt+D)"
-              >
-                <div className="breadcrumb-segments">
-                  {getBreadcrumbs(activeTab.path).map((crumb, idx, arr) => (
-                    <span key={crumb.fullPath} className="breadcrumb-segment-wrapper">
-                      <button
-                        type="button"
-                        className="breadcrumb-segment-btn"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          navigateToPath(crumb.fullPath);
-                        }}
-                        title={crumb.fullPath}
-                      >
-                        {crumb.label}
-                      </button>
-                      {idx < arr.length - 1 && (
-                        <FluentIcon name="chevron-right" size={10} className="breadcrumb-chevron" />
-                      )}
-                    </span>
-                  ))}
-                </div>
-                <button
-                  type="button"
-                  className="address-refresh-btn"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    refresh();
-                  }}
-                  title="Refresh (F5)"
-                >
-                  <FluentIcon name="refresh" size={13} />
-                </button>
-              </div>
-            ) : (
-              <form
-                className="address-edit-form"
-                onSubmit={(e) => {
-                  e.preventDefault();
-                  setIsEditingAddress(false);
-                  navigateToPath(activeTab.addressInput);
-                }}
-              >
-                <input
-                  ref={addressInputRef}
-                  type="text"
-                  className="address-input"
-                  value={activeTab.addressInput}
-                  onChange={(e) => updateActiveTab({ addressInput: e.target.value })}
-                  onBlur={() => setIsEditingAddress(false)}
-                  onKeyDown={(e) => {
-                    if (e.key === "Escape") {
-                      updateActiveTab({ addressInput: activeTab.path });
-                      setIsEditingAddress(false);
-                    }
-                  }}
-                  aria-label="Address"
-                  placeholder="Enter a path... (Ctrl+L)"
-                />
-                <button
-                  type="button"
-                  className="address-refresh-btn"
-                  onClick={() => refresh()}
-                  title="Refresh (F5)"
-                >
-                  <FluentIcon name="refresh" size={13} />
-                </button>
-              </form>
-            )}
-          </div>
-
-          <div className="search-container">
-            <div className="search-input-wrapper">
-              <span className="search-icon" aria-hidden="true">
-                <FluentIcon name="search" size={13} />
-              </span>
-              <input
-                ref={filterInputRef}
-                type="text"
-                className="search-input"
-                placeholder={
-                  searchScope === "folder"
-                    ? "Filter current folder..."
-                    : "Search subfolders (e.g. *.exe)..."
-                }
-                value={searchScope === "folder" ? activeTab.filterQuery : indexedSearchQuery}
-                onChange={(e) => {
-                  if (searchScope === "folder") {
-                    updateActiveTab({ filterQuery: e.target.value });
-                  } else {
-                    setIndexedSearchQuery(e.target.value);
-                  }
-                }}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter" && searchScope === "folder" && activeTab.filterQuery.trim()) {
-                    e.preventDefault();
-                    handleSearchSubfolders();
-                  }
-                }}
-                aria-label={searchScope === "folder" ? "Filter current folder" : "Search subfolders"}
-              />
-              {searchScope === "folder" && activeTab.filterQuery.trim().length >= 2 && (
-                <button
-                  type="button"
-                  className="search-subfolders-quick-btn"
-                  onClick={() => handleSearchSubfolders()}
-                  title="Search inside subfolders (Indexed)"
-                >
-                  <FluentIcon name="search" size={11} />
-                  <span>Subfolders</span>
-                </button>
-              )}
-              {searchScope === "folder" ? (
-                <button
-                  type="button"
-                  className="search-scope-pill"
-                  onClick={() => {
-                    setSearchScope("indexed");
-                    if (activeTab.filterQuery && !indexedSearchQuery) {
-                      setIndexedSearchQuery(activeTab.filterQuery);
-                    }
-                    filterInputRef.current?.focus();
-                  }}
-                  title="Switch to searching all subfolders"
-                >
-                  Current
-                </button>
-              ) : (
-                <button
-                  type="button"
-                  className="search-scope-pill active"
-                  onClick={() => {
-                    setSearchScope("folder");
-                    filterInputRef.current?.focus();
-                  }}
-                  title="Switch to filtering current folder"
-                >
-                  Subfolders
-                </button>
-              )}
-              {searchScope === "indexed" && searchLoading && (
-                <span className="search-spinner" title="Searching...">
-                  <FluentIcon name="refresh" size={12} />
-                </span>
-              )}
-            </div>
-          </div>
-        </div>
-
-        {/* Row 2: Windows 11 Fluent Command Bar */}
-        <div className="command-bar">
-          <button
-            type="button"
-            className="command-btn primary-action"
-            onClick={openCreateFolderModal}
-            title="New Folder (Ctrl+Shift+N)"
-            aria-label="New folder"
-          >
-            <span className="command-icon">
-              <FluentIcon name="folder-add" size={16} />
-            </span>
-            <span>New</span>
-          </button>
-
-          <span className="command-divider" aria-hidden="true" />
-
-          <button
-            type="button"
-            className="command-btn"
-            onClick={handleCut}
-            disabled={activeTab.selectedTokens.size === 0}
-            title="Cut (Ctrl+X)"
-            aria-label="Cut"
-          >
-            <span className="command-icon">
-              <FluentIcon name="cut" size={16} />
-            </span>
-            <span>Cut</span>
-          </button>
-
-          <button
-            type="button"
-            className="command-btn"
-            onClick={handleCopy}
-            disabled={activeTab.selectedTokens.size === 0}
-            title="Copy (Ctrl+C)"
-            aria-label="Copy"
-          >
-            <span className="command-icon">
-              <FluentIcon name="copy" size={16} />
-            </span>
-            <span>Copy</span>
-          </button>
-
-          <button
-            type="button"
-            className="command-btn"
-            onClick={handlePaste}
-            title="Paste (Ctrl+V)"
-            aria-label="Paste"
-          >
-            <span className="command-icon">
-              <FluentIcon name="paste" size={16} />
-            </span>
-            <span>Paste</span>
-          </button>
-
-          <button
-            type="button"
-            className="command-btn"
-            onClick={() => openRenameModal()}
-            disabled={activeTab.selectedTokens.size !== 1}
-            title="Rename (F2)"
-            aria-label="Rename"
-          >
-            <span className="command-icon">
-              <FluentIcon name="rename" size={16} />
-            </span>
-            <span>Rename</span>
-          </button>
-
-          <button
-            type="button"
-            className="command-btn"
-            onClick={() => openRecycleModal()}
-            disabled={activeTab.selectedTokens.size === 0}
-            title="Recycle (Delete)"
-            aria-label="Delete"
-          >
-            <span className="command-icon">
-              <FluentIcon name="delete" size={16} />
-            </span>
-            <span>Delete</span>
-          </button>
-
-          <span className="command-divider" aria-hidden="true" />
-
-          <button
-            type="button"
-            className={`command-btn ${showHiddenFiles ? "active" : ""}`}
-            onClick={toggleHiddenFiles}
-            title="Show or hide hidden files"
-            aria-label="Toggle hidden files"
-            aria-pressed={showHiddenFiles}
-          >
-            <span className="command-icon">
-              <FluentIcon name={showHiddenFiles ? "eye" : "eye-off"} size={16} />
-            </span>
-            <span>{showHiddenFiles ? "Hidden: On" : "Hidden: Off"}</span>
-          </button>
-
-          <span className="command-spacer" />
-
-          <button
-            type="button"
-            className={`command-btn ${showJobsDrawer ? "active" : ""}`}
-            onClick={() => {
-              setShowJobsDrawer(!showJobsDrawer);
-              refreshJobs();
-            }}
-            title="Toggle Background Jobs Activity"
-          >
-            <span className="command-icon">
-              <FluentIcon name="activity" size={16} />
-            </span>
-            <span>Activity</span>
-            {jobs.filter((j) => j.state === "running" || j.state === "validating").length > 0 && (
-              <span className="jobs-count-badge">
-                {jobs.filter((j) => j.state === "running" || j.state === "validating").length}
-              </span>
-            )}
-          </button>
-
-          <button
-            type="button"
-            className="command-btn"
-            onClick={toggleTheme}
-            title={`Current theme: ${theme}. Click to switch theme.`}
-            aria-label="Toggle theme"
-          >
-            <span className="command-icon">
-              <FluentIcon
-                name={theme === "system" ? "theme-system" : theme === "dark" ? "theme-moon" : "theme-sun"}
-                size={16}
-              />
-            </span>
-          </button>
-        </div>
+        <CommandBar
+          selectedCount={activeTab.selectedTokens.size}
+          showHiddenFiles={showHiddenFiles}
+          showPreviewPane={showPreviewPane}
+          showJobsDrawer={showJobsDrawer}
+          theme={theme}
+          jobs={jobs}
+          onCreateFolder={openCreateFolderModal}
+          onCut={handleCut}
+          onCopy={handleCopy}
+          onPaste={handlePaste}
+          onRename={() => openRenameModal()}
+          onRecycle={() => openRecycleModal()}
+          onToggleHiddenFiles={toggleHiddenFiles}
+          onTogglePreviewPane={() => setShowPreviewPane((prev) => !prev)}
+          onToggleJobsDrawer={() => {
+            setShowJobsDrawer(!showJobsDrawer);
+            refreshJobs();
+          }}
+          onToggleTheme={toggleTheme}
+        />
       </header>
 
       {/* Main Body */}
       <div className="app-body">
-        {/* Sidebar */}
-        <aside className="sidebar">
-          {/* Favorites */}
-          <section className="sidebar-section">
-            <h3>Favorites</h3>
-            {favorites.length === 0 ? (
-              <div className="sidebar-empty-note">No pinned favorites</div>
-            ) : (
-              <ul>
-                {favorites.map((favPath) => (
-                  <li
-                    key={favPath}
-                    className={activeTab.path === favPath ? "active" : ""}
-                    onClick={() => navigateToPath(favPath)}
-                  >
-                    <div className="sidebar-fav-item">
-                      <span className="sidebar-icon">
-                        <FluentIcon name="star" size={16} />
-                      </span>
-                      <span className="sidebar-label" title={favPath}>
-                        {getTabTitle(favPath)}
-                      </span>
-                    </div>
-                    <button
-                      className="fav-remove-btn"
-                      title="Remove from favorites"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        handleRemoveFavorite(favPath);
-                      }}
-                    >
-                      <FluentIcon name="close" size={10} />
-                    </button>
-                  </li>
-                ))}
-              </ul>
-            )}
-          </section>
-
-          {/* Known Folders */}
-          <section className="sidebar-section">
-            <h3>Quick Access</h3>
-            <ul>
-              {knownFolders.map((kf) => (
-                <li
-                  key={kf.id}
-                  onClick={() => navigateToPath(kf.path)}
-                  className={activeTab.path === kf.path ? "active" : ""}
-                >
-                  <div className="sidebar-fav-item">
-                    <span className="sidebar-icon">{getKnownFolderIcon(kf.name)}</span>
-                    <span className="sidebar-label">{kf.name}</span>
-                  </div>
-                </li>
-              ))}
-            </ul>
-          </section>
-
-          {/* Drives */}
-          <section className="sidebar-section">
-            <h3>This PC</h3>
-            <ul>
-              {drives.map((d) => {
-                const hasMetrics = d.total_bytes && d.total_bytes > 0;
-                const usedBytes = hasMetrics ? (d.total_bytes! - (d.free_bytes || 0)) : 0;
-                const usedPct = hasMetrics ? Math.round((usedBytes / d.total_bytes!) * 100) : 0;
-                return (
-                  <li
-                    key={d.path}
-                    onClick={() => navigateToPath(d.path)}
-                    className={activeTab.path === d.path ? "active" : ""}
-                    title={hasMetrics ? `${formatBytes(d.free_bytes)} free of ${formatBytes(d.total_bytes)}` : d.path}
-                  >
-                    <div className="sidebar-fav-item">
-                      <span className="sidebar-icon">
-                        <FluentIcon name="drive" size={16} />
-                      </span>
-                      <div className="drive-info-container">
-                        <span className="sidebar-label">{d.name}</span>
-                        {hasMetrics && (
-                          <>
-                            <div className="drive-capacity-bar">
-                              <div
-                                className={`drive-capacity-fill ${usedPct > 90 ? "high-usage" : ""}`}
-                                style={{ width: `${usedPct}%` }}
-                              />
-                            </div>
-                            <span className="drive-capacity-text">
-                              {formatBytes(d.free_bytes)} free
-                            </span>
-                          </>
-                        )}
-                      </div>
-                    </div>
-                  </li>
-                );
-              })}
-            </ul>
-          </section>
-
-          {/* Indexed Roots */}
-          <section className="sidebar-section">
-            <div className="sidebar-section-header">
-              <h3>Indexed Roots ({indexedRoots.length}/8)</h3>
-              <button
-                className="sidebar-add-btn"
-                title="Index current folder"
-                disabled={indexedRoots.length >= 8 || !activeTab.folderToken}
-                onClick={handleIndexCurrentFolder}
-              >
-                <FluentIcon name="add" size={12} />
-              </button>
-            </div>
-            {indexedRoots.length === 0 ? (
-              <div className="sidebar-empty-note">
-                No indexed roots
-                {activeTab.folderToken && (
-                  <button
-                    className="btn-link"
-                    onClick={handleIndexCurrentFolder}
-                  >
-                    Index current folder
-                  </button>
-                )}
-              </div>
-            ) : (
-              <ul className="indexed-roots-list">
-                {indexedRoots.map((root) => (
-                  <li key={root.id} className="indexed-root-item">
-                    <div
-                      className="indexed-root-info"
-                      onClick={() => navigateToPath(root.path_utf16)}
-                      title={`Path: ${root.display_path}\nState: ${root.state}\nEpoch: ${root.completed_epoch}`}
-                    >
-                      <span className="root-name">{getTabTitle(root.display_path)}</span>
-                      <span className={`root-badge badge-${root.state}`}>{root.state}</span>
-                    </div>
-                    <div className="root-actions">
-                      <button
-                        className="root-recrawl-btn"
-                        title="Re-crawl index"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          handleRecrawlRoot(root.id);
-                        }}
-                      >
-                        <FluentIcon name="refresh" size={12} />
-                      </button>
-                      <button
-                        className="fav-remove-btn"
-                        title="Remove from index"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          handleRemoveRoot(root.id);
-                        }}
-                      >
-                        <FluentIcon name="close" size={10} />
-                      </button>
-                    </div>
-                  </li>
-                ))}
-              </ul>
-            )}
-          </section>
-        </aside>
+        <Sidebar
+          favorites={favorites}
+          knownFolders={knownFolders}
+          drives={drives}
+          indexedRoots={indexedRoots}
+          activePath={activeTab.path}
+          hasActiveFolderToken={Boolean(activeTab.folderToken)}
+          onNavigate={(path) => navigateToPath(path)}
+          onRemoveFavorite={handleRemoveFavorite}
+          onIndexCurrentFolder={handleIndexCurrentFolder}
+          onRecrawlRoot={handleRecrawlRoot}
+          onRemoveRoot={handleRemoveRoot}
+        />
 
         {/* Content Pane */}
-        <main className="content-pane" role="region" aria-label="Folder contents">
+        <main
+          className="content-pane"
+          role="region"
+          aria-label="Folder contents"
+          onDragOver={(e) => {
+            if (draggedTokens.length > 0) {
+              e.preventDefault();
+              e.dataTransfer.dropEffect = e.ctrlKey ? "copy" : "move";
+            }
+          }}
+          onDrop={(e) => {
+            if (draggedTokens.length > 0 && activeTab.folderToken) {
+              e.preventDefault();
+              handleTransfer(activeTab.folderToken, null, !e.ctrlKey);
+            }
+          }}
+        >
           {isSearchActive ? (
             <>
               <div className="file-table-header">
@@ -2389,11 +1650,12 @@ export default function App() {
                     {rowVirtualizer.getVirtualItems().map((virtualRow) => {
                       const entry = displayedEntries[virtualRow.index];
                       const isSelected = activeTab.selectedTokens.has(entry.token);
+                      const isDropTarget = dropTargetToken === entry.token;
 
                       return (
                         <div
                           key={entry.token}
-                          className={`file-row ${isSelected ? "selected" : ""}`}
+                          className={`file-row ${isSelected ? "selected" : ""} ${isDropTarget ? "drop-target" : ""}`}
                           role="option"
                           aria-selected={isSelected}
                           tabIndex={
@@ -2402,6 +1664,43 @@ export default function App() {
                               ? 0
                               : -1
                           }
+                          draggable={true}
+                          onDragStart={(e) => {
+                            const tokens = isSelected
+                              ? Array.from(activeTab.selectedTokens)
+                              : [entry.token];
+                            setDraggedTokens(tokens);
+                            setDragSourceFolderToken(activeTab.folderToken);
+                            e.dataTransfer.setData("text/plain", entry.display_name);
+                            e.dataTransfer.effectAllowed = "copyMove";
+                          }}
+                          onDragEnd={() => {
+                            setDraggedTokens([]);
+                            setDragSourceFolderToken("");
+                            setDropTargetToken(null);
+                          }}
+                          onDragOver={(e) => {
+                            if (entry.kind === "directory" && draggedTokens.length > 0 && !draggedTokens.includes(entry.token)) {
+                              e.preventDefault();
+                              e.stopPropagation();
+                              e.dataTransfer.dropEffect = e.ctrlKey ? "copy" : "move";
+                              if (dropTargetToken !== entry.token) {
+                                setDropTargetToken(entry.token);
+                              }
+                            }
+                          }}
+                          onDragLeave={() => {
+                            if (dropTargetToken === entry.token) {
+                              setDropTargetToken(null);
+                            }
+                          }}
+                          onDrop={(e) => {
+                            if (entry.kind === "directory" && draggedTokens.length > 0) {
+                              e.preventDefault();
+                              e.stopPropagation();
+                              handleTransfer(activeTab.folderToken, entry.token, !e.ctrlKey);
+                            }
+                          }}
                           onClick={(e) => handleRowClick(entry, virtualRow.index, e)}
                           onDoubleClick={() => handleItemDoubleClick(entry)}
                           onContextMenu={(e) => handleRowContextMenu(entry, e)}
@@ -2442,437 +1741,84 @@ export default function App() {
             </>
           )}
         </main>
+
+        {/* File Preview Pane */}
+        {showPreviewPane && (
+          <PreviewPane
+            entry={selectedEntry}
+            preview={previewData}
+            loading={previewLoading}
+            error={previewError}
+            onClose={() => setShowPreviewPane(false)}
+          />
+        )}
       </div>
 
       {/* Status Bar */}
-      <footer className="app-statusbar">
-        <span>
-          {isSearchActive ? (
-            <>
-              {searchTotalMatches} {searchTotalMatches === 1 ? "match" : "matches"}
-              {searchIsCapped && " (First 1,000 matches; refine search)"}
-              {selectedSearchIndex >= 0 && " | 1 selected"}
-            </>
-          ) : (
-            <>
-              {displayedEntries.length} {displayedEntries.length === 1 ? "item" : "items"}
-              {activeTab.filterQuery && ` (filtered from ${visibleEntryCount})`}
-              {activeTab.selectedTokens.size > 0 && ` | ${activeTab.selectedTokens.size} selected`}
-            </>
-          )}
-        </span>
-        <span className="status-spacer"></span>
-        <button
-          className="action-btn"
-          style={{
-            padding: "2px 8px",
-            fontSize: "11px",
-            marginRight: "8px",
-            display: "inline-flex",
-            alignItems: "center",
-            gap: "4px",
-          }}
-          onClick={() => {
-            setShowJobsDrawer(!showJobsDrawer);
-            refreshJobs();
-          }}
-          title="Toggle Jobs Drawer"
-        >
-          <FluentIcon name="activity" size={12} />
-          <span>Jobs {jobs.length > 0 && `(${jobs.length})`}</span>
-        </button>
-        <span>{activeTab.path}</span>
-      </footer>
+      <StatusBar
+        isSearchActive={isSearchActive}
+        searchTotalMatches={searchTotalMatches}
+        searchIsCapped={searchIsCapped}
+        selectedSearchIndex={selectedSearchIndex}
+        displayedEntriesCount={displayedEntries.length}
+        visibleEntryCount={visibleEntryCount}
+        filterQuery={activeTab.filterQuery}
+        selectedCount={activeTab.selectedTokens.size}
+        activePath={activeTab.path}
+        jobs={jobs}
+        showJobsDrawer={showJobsDrawer}
+        onToggleJobsDrawer={() => {
+          setShowJobsDrawer(!showJobsDrawer);
+          refreshJobs();
+        }}
+      />
 
       {/* Context Menu */}
       {contextMenu && (
-        <div
-          className="context-menu"
-          style={{ top: `${contextMenu.y}px`, left: `${contextMenu.x}px` }}
-          onClick={(e) => e.stopPropagation()}
-        >
-          {contextMenu.searchResult ? (
-            <>
-              <div
-                className="context-menu-item"
-                onClick={() => {
-                  const item = contextMenu.searchResult!;
-                  setContextMenu(null);
-                  handleSearchResultDoubleClick(item);
-                }}
-              >
-                <span>Open</span>
-                <span className="context-menu-shortcut">Enter</span>
-              </div>
-              <div
-                className="context-menu-item"
-                onClick={() => {
-                  const item = contextMenu.searchResult!;
-                  setContextMenu(null);
-                  const parent = getParentPath(item.path_utf16, item.path);
-                  if (parent) {
-                    if (parent.utf16) {
-                      navigateToPath(parent.utf16);
-                    } else if (parent.display) {
-                      navigateToPath(parent.display);
-                    }
-                  }
-                }}
-              >
-                <span>Open containing folder</span>
-              </div>
-              <div
-                className="context-menu-item"
-                onClick={() => {
-                  const item = contextMenu.searchResult!;
-                  setContextMenu(null);
-                  client.clipboardWritePath(item.path_utf16);
-                }}
-              >
-                <span>Copy path</span>
-              </div>
-            </>
-          ) : contextMenu.entry ? (
-            <>
-              <div className="context-menu-quick-actions">
-                <button
-                  type="button"
-                  className="context-quick-btn"
-                  title="Cut (Ctrl+X)"
-                  onClick={() => {
-                    setContextMenu(null);
-                    handleCut();
-                  }}
-                >
-                  <FluentIcon name="cut" size={15} />
-                </button>
-                <button
-                  type="button"
-                  className="context-quick-btn"
-                  title="Copy (Ctrl+C)"
-                  onClick={() => {
-                    setContextMenu(null);
-                    handleCopy();
-                  }}
-                >
-                  <FluentIcon name="copy" size={15} />
-                </button>
-                <button
-                  type="button"
-                  className="context-quick-btn"
-                  title="Rename (F2)"
-                  onClick={() => {
-                    const entry = contextMenu.entry!;
-                    setContextMenu(null);
-                    openRenameModal(entry);
-                  }}
-                >
-                  <FluentIcon name="rename" size={15} />
-                </button>
-                <button
-                  type="button"
-                  className="context-quick-btn"
-                  title="Delete (Del)"
-                  onClick={() => {
-                    const entry = contextMenu.entry!;
-                    setContextMenu(null);
-                    openRecycleModal(entry);
-                  }}
-                >
-                  <FluentIcon name="delete" size={15} />
-                </button>
-              </div>
-
-              <div
-                className="context-menu-item"
-                onClick={() => {
-                  const entry = contextMenu.entry!;
-                  setContextMenu(null);
-                  handleItemDoubleClick(entry);
-                }}
-              >
-                <span>Open</span>
-                <span className="context-menu-shortcut">Enter</span>
-              </div>
-              <div
-                className="context-menu-item"
-                onClick={() => {
-                  setContextMenu(null);
-                  handleCopy();
-                }}
-              >
-                <span>Copy</span>
-                <span className="context-menu-shortcut">Ctrl+C</span>
-              </div>
-              <div
-                className="context-menu-item"
-                onClick={() => {
-                  setContextMenu(null);
-                  handleCut();
-                }}
-              >
-                <span>Cut</span>
-                <span className="context-menu-shortcut">Ctrl+X</span>
-              </div>
-              <div
-                className="context-menu-item"
-                onClick={() => {
-                  const entry = contextMenu.entry!;
-                  openRenameModal(entry);
-                }}
-              >
-                <span>Rename</span>
-                <span className="context-menu-shortcut">F2</span>
-              </div>
-              <div
-                className="context-menu-item"
-                onClick={() => {
-                  const entry = contextMenu.entry!;
-                  openRecycleModal(entry);
-                }}
-              >
-                <span>Delete</span>
-                <span className="context-menu-shortcut">Del</span>
-              </div>
-              <div
-                className="context-menu-item"
-                onClick={() => {
-                  const entry = contextMenu.entry!;
-                  setContextMenu(null);
-                  client.openInExplorer(activeTab.folderToken, entry.token);
-                }}
-              >
-                <span>Open in Windows Explorer</span>
-              </div>
-              {contextMenu.entry.kind === "directory" && (
-                <div
-                  className="context-menu-item"
-                  onClick={() => {
-                    const entry = contextMenu.entry!;
-                    setContextMenu(null);
-                    const fullPath = activeTab.path.endsWith("\\")
-                      ? activeTab.path + entry.display_name
-                      : activeTab.path + "\\" + entry.display_name;
-                    handleAddFavorite(fullPath);
-                  }}
-                >
-                  <span>Add to Favorites</span>
-                </div>
-              )}
-              <div className="context-menu-separator" />
-              <div
-                className="context-menu-item"
-                onClick={() => {
-                  const entry = contextMenu.entry!;
-                  setContextMenu(null);
-                  client.showProperties(activeTab.folderToken, entry.token);
-                }}
-              >
-                <span>Properties</span>
-                <span className="context-menu-shortcut">Alt+Enter</span>
-              </div>
-            </>
-          ) : (
-            <>
-              <div
-                className="context-menu-item"
-                onClick={() => {
-                  openCreateFolderModal();
-                }}
-              >
-                <span>New Folder</span>
-                <span className="context-menu-shortcut">Ctrl+Shift+N</span>
-              </div>
-              <div
-                className="context-menu-item"
-                onClick={() => {
-                  setContextMenu(null);
-                  handlePaste();
-                }}
-              >
-                <span>Paste</span>
-                <span className="context-menu-shortcut">Ctrl+V</span>
-              </div>
-              <div
-                className="context-menu-item"
-                onClick={() => {
-                  setContextMenu(null);
-                  refresh();
-                }}
-              >
-                <span>Refresh</span>
-                <span className="context-menu-shortcut">F5</span>
-              </div>
-              <div
-                className="context-menu-item"
-                onClick={() => {
-                  setContextMenu(null);
-                  client.openInExplorer(activeTab.folderToken, null);
-                }}
-              >
-                <span>Open in Windows Explorer</span>
-              </div>
-              <div
-                className="context-menu-item"
-                onClick={() => {
-                  setContextMenu(null);
-                  handleAddFavorite(activeTab.path);
-                }}
-              >
-                <span>Add Current Folder to Favorites</span>
-              </div>
-              <div className="context-menu-separator" />
-              <div
-                className="context-menu-item"
-                onClick={() => {
-                  setContextMenu(null);
-                  client.showProperties(activeTab.folderToken, null);
-                }}
-              >
-                <span>Properties</span>
-                <span className="context-menu-shortcut">Alt+Enter</span>
-              </div>
-            </>
-          )}
-        </div>
+        <ContextMenu
+          contextMenu={contextMenu}
+          activePath={activeTab.path}
+          onClose={() => setContextMenu(null)}
+          onOpenEntry={handleItemDoubleClick}
+          onOpenSearchResult={handleSearchResultDoubleClick}
+          onOpenContainingFolder={(item) => {
+            const parent = getParentPath(item.path_utf16, item.path);
+            if (parent) {
+              if (parent.utf16) navigateToPath(parent.utf16);
+              else if (parent.display) navigateToPath(parent.display);
+            }
+          }}
+          onCopySearchResultPath={(item) => client.clipboardWritePath(item.path_utf16)}
+          onCut={handleCut}
+          onCopy={handleCopy}
+          onPaste={handlePaste}
+          onRefresh={refresh}
+          onOpenRenameModal={openRenameModal}
+          onOpenRecycleModal={openRecycleModal}
+          onOpenCreateFolderModal={openCreateFolderModal}
+          onOpenInExplorer={(token) => client.openInExplorer(activeTab.folderToken, token)}
+          onAddFavorite={handleAddFavorite}
+          onShowProperties={(token) => client.showProperties(activeTab.folderToken, token)}
+        />
       )}
 
-      {/* Modal Dialog (New Folder / Rename / Recycle) */}
+      {/* Modal Dialog */}
       {modal && (
-        <div className="modal-overlay" onClick={() => setModal(null)}>
-          <div className="modal-container" onClick={(e) => e.stopPropagation()}>
-            <div className="modal-header">{modal.title}</div>
-            <form onSubmit={handleModalSubmit}>
-              <div className="modal-body">
-                {modal.type === "recycle" ? (
-                  <div style={{ fontSize: "14px", lineHeight: "1.5" }}>
-                    Are you sure you want to send{" "}
-                    <strong>
-                      {modal.targetTokens?.length === 1
-                        ? `"${modal.value}"`
-                        : `${modal.targetTokens?.length} items`}
-                    </strong>{" "}
-                    to the Recycle Bin?
-                    <div style={{ marginTop: "8px", fontSize: "12px", color: "var(--text-muted)" }}>
-                      Permanent deletion fallback is disabled for safety.
-                    </div>
-                  </div>
-                ) : (
-                  <input
-                    ref={modalInputRef}
-                    type="text"
-                    className="modal-input"
-                    value={modal.value}
-                    onChange={(e) => setModal({ ...modal, value: e.target.value, error: null })}
-                    placeholder="Enter name..."
-                  />
-                )}
-                {modal.error && (
-                  <div
-                    style={{
-                      color: "var(--error-text)",
-                      fontSize: "12px",
-                      marginTop: "8px",
-                      display: "flex",
-                      alignItems: "center",
-                      gap: "6px",
-                    }}
-                  >
-                    <FluentIcon name="warning" size={14} />
-                    <span>{modal.error}</span>
-                  </div>
-                )}
-              </div>
-              <div className="modal-footer">
-                <button
-                  type="button"
-                  className="modal-btn modal-btn-secondary"
-                  onClick={() => setModal(null)}
-                >
-                  Cancel
-                </button>
-                <button
-                  type="submit"
-                  className={`modal-btn ${modal.type === "recycle" ? "modal-btn-danger" : "modal-btn-primary"}`}
-                >
-                  {modal.type === "create_folder" ? "Create" : modal.type === "rename" ? "Rename" : "Recycle"}
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
+        <ModalDialog
+          modal={modal}
+          modalInputRef={modalInputRef}
+          onClose={() => setModal(null)}
+          onSubmit={handleModalSubmit}
+          onValueChange={(val) => setModal({ ...modal, value: val, error: null })}
+        />
       )}
 
-      {/* Job Drawer */}
+      {/* Jobs Drawer */}
       {showJobsDrawer && (
-        <div className="jobs-drawer">
-          <div className="jobs-header">
-            <span>Operation Jobs ({jobs.length})</span>
-            <div className="jobs-header-actions">
-              <button
-                className="jobs-close-btn"
-                onClick={() => setShowJobsDrawer(false)}
-                title="Close"
-              >
-                <FluentIcon name="close" size={10} />
-              </button>
-            </div>
-          </div>
-          <div className="jobs-list">
-            {jobs.length === 0 ? (
-              <div className="jobs-empty-note">No recent operation jobs</div>
-            ) : (
-              jobs.map((job) => (
-                <div key={job.id} className="job-card">
-                  <div className="job-card-header">
-                    <span className="job-card-title">{job.kind.replace("_", " ")}</span>
-                    <span className={`job-badge ${job.state}`}>{job.state}</span>
-                  </div>
-                  <div className="job-card-details">
-                    <span>
-                      {job.completed_items} succeeded · {job.failed_items} failed ·{" "}
-                      {job.canceled_items} canceled · {job.skipped_items} skipped
-                    </span>
-                    <span>
-                      {new Date(job.created_at_epoch * 1000).toLocaleTimeString([], {
-                        hour: "2-digit",
-                        minute: "2-digit",
-                        second: "2-digit",
-                      })}
-                    </span>
-                  </div>
-                  {job.error_message && (
-                    <div
-                      className="job-card-error"
-                      style={{ display: "flex", alignItems: "center", gap: "6px" }}
-                    >
-                      <FluentIcon name="warning" size={14} />
-                      <span>{job.error_message}</span>
-                    </div>
-                  )}
-                  {job.item_outcomes.length > 0 && (
-                    <details className="job-item-outcomes">
-                      <summary>Item outcomes ({job.item_outcomes.length})</summary>
-                      <ul>
-                        {job.item_outcomes.slice(0, 100).map((outcome, index) => (
-                          <li key={`${job.id}-${index}`} title={outcome.error_message || undefined}>
-                            <strong>{outcome.status}</strong> — {outcome.item_display}
-                            {(outcome.actual_destination_display || outcome.requested_destination_display) && (
-                              <> → {outcome.actual_destination_display || outcome.requested_destination_display}</>
-                            )}
-                          </li>
-                        ))}
-                      </ul>
-                      {job.item_outcomes.length > 100 && (
-                        <p>Showing first 100 of {job.item_outcomes.length} outcomes.</p>
-                      )}
-                    </details>
-                  )}
-                </div>
-              ))
-            )}
-          </div>
-        </div>
+        <JobsDrawer
+          jobs={jobs}
+          onClose={() => setShowJobsDrawer(false)}
+        />
       )}
     </div>
   );

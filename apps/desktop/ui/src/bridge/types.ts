@@ -171,3 +171,26 @@ export interface SearchResponse {
   page: number;
   page_size: number;
 }
+
+export type PreviewData =
+  | {
+      kind: "text";
+      content: string;
+      truncated: boolean;
+      encoding: string;
+      line_count: number;
+    }
+  | {
+      kind: "image";
+      mime: string;
+      data_base64: string;
+      byte_len: number;
+    }
+  | {
+      kind: "folder";
+      item_count?: number | null;
+    }
+  | {
+      kind: "unsupported";
+      reason: string;
+    };

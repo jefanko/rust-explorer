@@ -12,6 +12,7 @@ import {
   WatchNotification,
   IndexedRoot,
   SearchResponse,
+  PreviewData,
 } from "./types";
 
 export const client = {
@@ -54,6 +55,16 @@ export const client = {
     itemToken: string
   ): Promise<NavigationResponse | null> {
     return invoke<NavigationResponse | null>("open_item", {
+      folderToken,
+      itemToken,
+    });
+  },
+
+  async readPreview(
+    folderToken: string,
+    itemToken: string
+  ): Promise<PreviewData> {
+    return invoke<PreviewData>("read_preview", {
       folderToken,
       itemToken,
     });
@@ -153,6 +164,22 @@ export const client = {
 
   async planRecycle(folderToken: string, itemTokens: string[]): Promise<OperationPlan> {
     return invoke<OperationPlan>("plan_recycle", { folderToken, itemTokens });
+  },
+
+  async planTransfer(
+    sourceFolderToken: string,
+    itemTokens: string[],
+    destinationFolderToken: string,
+    destinationItemToken: string | null = null,
+    isMove: boolean = true
+  ): Promise<OperationPlan> {
+    return invoke<OperationPlan>("plan_transfer", {
+      sourceFolderToken,
+      itemTokens,
+      destinationFolderToken,
+      destinationItemToken,
+      isMove,
+    });
   },
 
   async clipboardWriteItems(folderToken: string, itemTokens: string[], isCut: boolean): Promise<void> {

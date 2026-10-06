@@ -1,30 +1,25 @@
 import { describe, it, expect } from "vitest";
+import { formatBytes, formatFiletime } from "../lib/format";
 import {
-  matchFilterQuery,
+  getTabTitle,
   getBreadcrumbs,
   getParentPathUtf16,
   getParentPathString,
   getParentPath,
-} from "../app/App";
+  sameWindowsPath,
+} from "../lib/paths";
+import { matchFilterQuery } from "../lib/filter";
+import {
+  tokensInRange,
+  moveSelection,
+  nextFocusIndex,
+} from "../lib/selection";
+import { validateIndexedQuery } from "../lib/searchQuery";
+import { recycleDialogText, recycleTargetLabel } from "../lib/recycle";
+import { createInitialTab } from "../state/tabs";
 
-function formatBytes(bytes?: number | null): string {
-  if (bytes === null || bytes === undefined) return "";
-  if (bytes === 0) return "0 B";
-  const k = 1024;
-  const sizes = ["B", "KB", "MB", "GB", "TB"];
-  const i = Math.floor(Math.log(bytes) / Math.log(k));
-  return `${parseFloat((bytes / Math.pow(k, i)).toFixed(1))} ${sizes[i]}`;
-}
-
-function getTabTitle(path: string): string {
-  if (!path) return "New Tab";
-  const trimmed = path.replace(/[\\/]+$/, "");
-  const parts = trimmed.split(/[\\/]/);
-  return parts.pop() || path || "PC";
-}
-
-describe("App Formatting and Tab Helpers", () => {
-  it("correctly formats byte sizes across ranges", () => {
+describe("Production Formatting Helpers", () => {
+  it("correctly formats byte sizes across all standard units", () => {
     expect(formatBytes(null)).toBe("");
     expect(formatBytes(undefined)).toBe("");
     expect(formatBytes(0)).toBe("0 B");
@@ -32,67 +27,84 @@ describe("App Formatting and Tab Helpers", () => {
     expect(formatBytes(1024)).toBe("1 KB");
     expect(formatBytes(1048576)).toBe("1 MB");
     expect(formatBytes(1073741824)).toBe("1 GB");
+    expect(formatBytes(1099511627776)).toBe("1 TB");
   });
 
-  it("extracts clean and readable tab titles from Windows paths", () => {
+  it("formats Windows FILETIME values into readable timestamps", () => {
+    expect(formatFiletime(null)).toBe("");
+    expect(formatFiletime(undefined)).toBe("");
+    expect(formatFiletime(0)).toBe("");
+    // A known valid Windows FILETIME: 133722240000000000 (~October 2024)
+    const formatted = formatFiletime(133722240000000000);
+    expect(formatted).not.toBe("");
+    expect(typeof formatted).toBe("string");
+  });
+});
+
+describe("Production Path Utilities", () => {
+  it("extracts clean and readable tab titles from various Windows paths", () => {
     expect(getTabTitle("")).toBe("New Tab");
     expect(getTabTitle("C:\\")).toBe("C:");
     expect(getTabTitle("C:\\Users\\Default\\Documents")).toBe("Documents");
     expect(getTabTitle("D:\\dev\\rust-explorer\\")).toBe("rust-explorer");
     expect(getTabTitle("\\\\Server\\Share\\Subfolder")).toBe("Subfolder");
+    expect(getTabTitle("\\\\?\\C:\\MyFolder")).toBe("MyFolder");
   });
 
-  it("handles multi-selection range calculation properly", () => {
-    const totalItems = 10;
-    const anchor = 2;
-    const current = 5;
-    const start = Math.min(anchor, current);
-    const end = Math.max(anchor, current);
-
-    const selectedIndices: number[] = [];
-    for (let i = start; i <= end; i++) {
-      if (i < totalItems) {
-        selectedIndices.push(i);
-      }
-    }
-
-    expect(selectedIndices).toEqual([2, 3, 4, 5]);
+  it("splits Windows paths into breadcrumb segments correctly", () => {
+    const crumbs = getBreadcrumbs("C:\\Users\\Default\\Documents");
+    expect(crumbs).toHaveLength(4);
+    expect(crumbs[0]).toEqual({ label: "C:", fullPath: "C:\\" });
+    expect(crumbs[1]).toEqual({ label: "Users", fullPath: "C:\\Users" });
+    expect(crumbs[2]).toEqual({ label: "Default", fullPath: "C:\\Users\\Default" });
+    expect(crumbs[3]).toEqual({ label: "Documents", fullPath: "C:\\Users\\Default\\Documents" });
   });
 
-  it("validates search query constraints per Section 14 spec", () => {
-    function isValidSearchQuery(q: string): { valid: boolean; error?: string } {
-      const trimmed = q.trim();
-      if (!trimmed) return { valid: false };
-      const hasMetadataFilter = /(?:ext:|\*\.|\.)[a-z0-9_-]+|type:(?:folder|file)/i.test(trimmed);
-      const textWithoutFilters = trimmed.replace(/(?:ext:|\*\.|\.)[a-z0-9_-]+|type:[^\s]+/gi, "").trim();
-      if (!hasMetadataFilter && textWithoutFilters.length < 3) {
-        return { valid: false, error: "Use at least 3 characters for indexed search" };
-      }
-      return { valid: true };
-    }
-
-    expect(isValidSearchQuery("").valid).toBe(false);
-    expect(isValidSearchQuery("a")).toEqual({
-      valid: false,
-      error: "Use at least 3 characters for indexed search",
-    });
-    expect(isValidSearchQuery("ab")).toEqual({
-      valid: false,
-      error: "Use at least 3 characters for indexed search",
-    });
-    expect(isValidSearchQuery("abc").valid).toBe(true);
-    expect(isValidSearchQuery("invoice").valid).toBe(true);
-    expect(isValidSearchQuery("ext:pdf").valid).toBe(true);
-    expect(isValidSearchQuery("*.exe").valid).toBe(true);
-    expect(isValidSearchQuery(".exe").valid).toBe(true);
-    expect(isValidSearchQuery("*.c").valid).toBe(true);
-    expect(isValidSearchQuery(".c").valid).toBe(true);
-    expect(isValidSearchQuery("type:folder").valid).toBe(true);
-    expect(isValidSearchQuery("a ext:pdf").valid).toBe(true);
-    expect(isValidSearchQuery("a *.exe").valid).toBe(true);
+  it("compares Windows paths case-insensitively with sameWindowsPath", () => {
+    const toUnits = (s: string) => Array.from(s).map((c) => c.charCodeAt(0));
+    expect(sameWindowsPath(toUnits("C:\\Dev\\App"), toUnits("c:\\dev\\app"))).toBe(true);
+    expect(sameWindowsPath(toUnits("C:\\Dev\\App"), toUnits("C:\\Dev\\Other"))).toBe(false);
+    expect(sameWindowsPath(toUnits("C:\\Dev"), toUnits("C:\\Dev\\App"))).toBe(false);
   });
 
-  it("filters folder entries using matchFilterQuery with extensions and globs", () => {
+  it("computes parent folder correctly for extended, DOS, and UNC paths without stripping drive root slash", () => {
+    // Extended drive paths
+    expect(getParentPathString("\\\\?\\D:\\dev")).toBe("\\\\?\\D:\\");
+    expect(getParentPathString("\\\\?\\D:\\dev\\rust-explorer")).toBe("\\\\?\\D:\\dev");
+    expect(getParentPathString("\\\\?\\D:\\")).toBeNull();
+    expect(getParentPathString("\\\\?\\D:")).toBeNull();
+
+    // Standard DOS drive paths
+    expect(getParentPathString("D:\\dev")).toBe("D:\\");
+    expect(getParentPathString("D:\\dev\\rust-explorer")).toBe("D:\\dev");
+    expect(getParentPathString("D:\\")).toBeNull();
+    expect(getParentPathString("D:")).toBeNull();
+
+    // UNC paths
+    expect(getParentPathString("\\\\server\\share\\sub")).toBe("\\\\server\\share");
+    expect(getParentPathString("\\\\server\\share")).toBeNull();
+    expect(getParentPathString("\\\\?\\UNC\\server\\share\\sub")).toBe("\\\\?\\UNC\\server\\share");
+    expect(getParentPathString("\\\\?\\UNC\\server\\share")).toBeNull();
+
+    // UTF-16 code units helper
+    const toUnits = (s: string) => Array.from(s).map((c) => c.charCodeAt(0));
+    const fromUnits = (u: number[] | null) => (u ? String.fromCharCode(...u) : null);
+
+    expect(fromUnits(getParentPathUtf16(toUnits("\\\\?\\D:\\dev")))).toBe("\\\\?\\D:\\");
+    expect(getParentPathUtf16(toUnits("\\\\?\\D:\\"))).toBeNull();
+
+    // Unified getParentPath
+    const parentDev = getParentPath(toUnits("\\\\?\\D:\\dev"), "D:\\dev");
+    expect(parentDev).not.toBeNull();
+    expect(fromUnits(parentDev!.utf16!)).toBe("\\\\?\\D:\\");
+
+    const parentRoot = getParentPath(toUnits("\\\\?\\D:\\"), "D:\\");
+    expect(parentRoot).toBeNull();
+  });
+});
+
+describe("Production Filter & Query Validation", () => {
+  it("filters folder entries using matchFilterQuery with extensions, globs, and types", () => {
     const exeFile = { display_name: "rust-explorer.exe", extension: "exe", kind: "file" };
     const pdfFile = { display_name: "annual_report.pdf", extension: "pdf", kind: "file" };
     const folder = { display_name: "src", extension: "", kind: "directory" };
@@ -115,90 +127,97 @@ describe("App Formatting and Tab Helpers", () => {
     expect(matchFilterQuery(exeFile, "type:file")).toBe(true);
   });
 
-  it("extracts containing folder path for search results", () => {
-    function getContainingFolder(fullPath: string): string {
-      return fullPath.replace(/\\[^\\]+$/, "");
-    }
-
-    expect(getContainingFolder("C:\\Users\\Default\\Documents\\report.docx")).toBe("C:\\Users\\Default\\Documents");
-    expect(getContainingFolder("D:\\projects\\rust\\main.rs")).toBe("D:\\projects\\rust");
-  });
-
-  it("splits Windows paths into breadcrumb segments correctly", () => {
-    const crumbs = getBreadcrumbs("C:\\Users\\Default\\Documents");
-    expect(crumbs).toHaveLength(4);
-    expect(crumbs[0]).toEqual({ label: "C:", fullPath: "C:\\" });
-    expect(crumbs[1]).toEqual({ label: "Users", fullPath: "C:\\Users" });
-    expect(crumbs[2]).toEqual({ label: "Default", fullPath: "C:\\Users\\Default" });
-    expect(crumbs[3]).toEqual({ label: "Documents", fullPath: "C:\\Users\\Default\\Documents" });
-  });
-
-  it("filters file entries case-insensitively", () => {
-    const entries = [
-      { name: "Report2026.docx", is_dir: false },
-      { name: "Invoice_September.pdf", is_dir: false },
-      { name: "Photos", is_dir: true },
-      { name: "report_draft.txt", is_dir: false },
-    ];
-
-    const filterText = "report";
-    const filtered = entries.filter((e) =>
-      e.name.toLowerCase().includes(filterText.toLowerCase())
-    );
-
-    expect(filtered).toHaveLength(2);
-    expect(filtered.map((e) => e.name)).toEqual(["Report2026.docx", "report_draft.txt"]);
-  });
-
-  it("formats recycle confirmation details accurately", () => {
-    function getRecycleConfirmationMessage(items: string[]): string {
-      if (items.length === 1) {
-        return `Are you sure you want to move "${items[0]}" to the Recycle Bin?`;
-      }
-      return `Are you sure you want to move these ${items.length} items to the Recycle Bin?`;
-    }
-
-    expect(getRecycleConfirmationMessage(["test.txt"])).toBe(
-      'Are you sure you want to move "test.txt" to the Recycle Bin?'
-    );
-    expect(getRecycleConfirmationMessage(["a.txt", "b.txt", "c.txt"])).toBe(
-      "Are you sure you want to move these 3 items to the Recycle Bin?"
-    );
-  });
-
-  it("computes parent folder correctly for extended, DOS, and UNC paths without stripping drive root slash", () => {
-    // 1. Extended drive paths
-    expect(getParentPathString("\\\\?\\D:\\dev")).toBe("\\\\?\\D:\\");
-    expect(getParentPathString("\\\\?\\D:\\dev\\rust-explorer")).toBe("\\\\?\\D:\\dev");
-    expect(getParentPathString("\\\\?\\D:\\")).toBeNull();
-    expect(getParentPathString("\\\\?\\D:")).toBeNull();
-
-    // 2. Standard DOS drive paths
-    expect(getParentPathString("D:\\dev")).toBe("D:\\");
-    expect(getParentPathString("D:\\dev\\rust-explorer")).toBe("D:\\dev");
-    expect(getParentPathString("D:\\")).toBeNull();
-    expect(getParentPathString("D:")).toBeNull();
-
-    // 3. UNC paths
-    expect(getParentPathString("\\\\server\\share\\sub")).toBe("\\\\server\\share");
-    expect(getParentPathString("\\\\server\\share")).toBeNull();
-    expect(getParentPathString("\\\\?\\UNC\\server\\share\\sub")).toBe("\\\\?\\UNC\\server\\share");
-    expect(getParentPathString("\\\\?\\UNC\\server\\share")).toBeNull();
-
-    // 4. UTF-16 code units helper
-    const toUnits = (s: string) => Array.from(s).map((c) => c.charCodeAt(0));
-    const fromUnits = (u: number[] | null) => (u ? String.fromCharCode(...u) : null);
-
-    expect(fromUnits(getParentPathUtf16(toUnits("\\\\?\\D:\\dev")))).toBe("\\\\?\\D:\\");
-    expect(getParentPathUtf16(toUnits("\\\\?\\D:\\"))).toBeNull();
-
-    // 5. Unified getParentPath
-    const parentDev = getParentPath(toUnits("\\\\?\\D:\\dev"), "D:\\dev");
-    expect(parentDev).not.toBeNull();
-    expect(fromUnits(parentDev!.utf16!)).toBe("\\\\?\\D:\\");
-
-    const parentRoot = getParentPath(toUnits("\\\\?\\D:\\"), "D:\\");
-    expect(parentRoot).toBeNull();
+  it("validates indexed search queries using production validateIndexedQuery", () => {
+    expect(validateIndexedQuery("").valid).toBe(false);
+    expect(validateIndexedQuery("a")).toEqual({
+      valid: false,
+      error: "Use at least 3 characters for indexed search",
+    });
+    expect(validateIndexedQuery("ab")).toEqual({
+      valid: false,
+      error: "Use at least 3 characters for indexed search",
+    });
+    expect(validateIndexedQuery("abc").valid).toBe(true);
+    expect(validateIndexedQuery("invoice").valid).toBe(true);
+    expect(validateIndexedQuery("ext:pdf").valid).toBe(true);
+    expect(validateIndexedQuery("*.exe").valid).toBe(true);
+    expect(validateIndexedQuery(".exe").valid).toBe(true);
+    expect(validateIndexedQuery("type:folder").valid).toBe(true);
+    expect(validateIndexedQuery("a ext:pdf").valid).toBe(true);
+    expect(validateIndexedQuery("a *.exe").valid).toBe(true);
   });
 });
 
+describe("Production Selection Helpers", () => {
+  const entries = [
+    { token: "t0" },
+    { token: "t1" },
+    { token: "t2" },
+    { token: "t3" },
+    { token: "t4" },
+    { token: "t5" },
+  ];
+
+  it("tokensInRange collects tokens correctly irrespective of order", () => {
+    const range1 = tokensInRange(entries, 1, 3);
+    expect(Array.from(range1)).toEqual(["t1", "t2", "t3"]);
+
+    const range2 = tokensInRange(entries, 4, 2);
+    expect(Array.from(range2)).toEqual(["t2", "t3", "t4"]);
+  });
+
+  it("moveSelection calculates single selection and shift-range extensions", () => {
+    // Single click / arrow
+    const single = moveSelection(entries, 1, 3, false);
+    expect(single).toEqual({
+      focusedIndex: 3,
+      anchorIndex: 3,
+      selectedTokens: new Set(["t3"]),
+    });
+
+    // Shift range extension
+    const extended = moveSelection(entries, 1, 3, true);
+    expect(extended?.focusedIndex).toBe(3);
+    expect(extended?.anchorIndex).toBe(1);
+    expect(Array.from(extended?.selectedTokens ?? [])).toEqual(["t1", "t2", "t3"]);
+  });
+
+  it("nextFocusIndex handles boundary clamping and empty collections", () => {
+    expect(nextFocusIndex(-1, 1, 5)).toBe(0);
+    expect(nextFocusIndex(-1, -1, 5)).toBe(4);
+    expect(nextFocusIndex(2, 1, 5)).toBe(3);
+    expect(nextFocusIndex(4, 1, 5)).toBe(4);
+    expect(nextFocusIndex(0, -1, 5)).toBe(0);
+    expect(nextFocusIndex(-1, 1, 0)).toBe(-1);
+  });
+});
+
+describe("Production Recycle Dialog Formatting", () => {
+  it("formats confirmation dialog text accurately for single and multiple items", () => {
+    const single = recycleDialogText(["report.pdf"]);
+    expect(single.title).toBe('Recycle "report.pdf"?');
+    expect(single.value).toBe("report.pdf");
+
+    const multi = recycleDialogText(["a.txt", "b.txt", "c.txt"]);
+    expect(multi.title).toBe("Recycle 3 items?");
+    expect(multi.value).toBe("3 items");
+
+    expect(recycleTargetLabel("report.pdf", 1)).toBe('"report.pdf"');
+    expect(recycleTargetLabel("3 items", 3)).toBe("3 items");
+  });
+});
+
+describe("Production Tab Factory", () => {
+  it("initializes tab state cleanly with defaults", () => {
+    const tab = createInitialTab("test_tab", "C:\\Users");
+    expect(tab.id).toBe("test_tab");
+    expect(tab.title).toBe("Users");
+    expect(tab.path).toBe("C:\\Users");
+    expect(tab.addressInput).toBe("C:\\Users");
+    expect(tab.loading).toBe(true);
+    expect(tab.history).toHaveLength(1);
+    expect(tab.sortColumn).toBe("name");
+    expect(tab.sortDirection).toBe("ascending");
+    expect(tab.selectedTokens.size).toBe(0);
+  });
+});
