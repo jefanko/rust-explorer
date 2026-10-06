@@ -220,6 +220,56 @@ pub fn plan_move(sources: &[PathBuf], destination: &Path) -> Result<OperationPla
 pub fn plan_recycle(sources: &[PathBuf]) -> Result<OperationPlan, ExplorerError> {
     plan_transfer(OperationKind::Recycle, sources, None)
 }
+
+/// Validates a drag & drop transfer request and returns friendly, user-facing errors.
+///
+/// This is a cheap pre-check that runs before `plan_copy` / `plan_move`; the mutation policy
+/// still performs the authoritative safety preflight afterwards.
+pub fn validate_drop_request(
+    sources: &[PathBuf],
+    destination: &Path,
+    is_move: bool,
+) -> Result<(), ExplorerError> {
+    const OP: &str = "validate_drop_request";
+    if sources.is_empty() {
+        return Err(ExplorerError::new(
+            ErrorCode::UnsupportedPath,
+            "No items selected to drop",
+            OP,
+        ));
+    }
+    if !destination.is_dir() {
+        return Err(ExplorerError::new(
+            ErrorCode::UnsupportedPath,
+            "Drop target is not a folder",
+            OP,
+        ));
+    }
+    let verb = if is_move { "move" } else { "copy" };
+    let mut all_in_destination = true;
+    for source in sources {
+        if source.is_dir() && explorer_fs::policy::is_within(source, destination)? {
+            return Err(ExplorerError::new(
+                ErrorCode::UnsupportedPath,
+                format!("Cannot {verb} a folder into itself or one of its subfolders"),
+                OP,
+            ));
+        }
+        let in_destination = match source.parent() {
+            Some(parent) => explorer_fs::policy::same_directory(parent, destination)?,
+            None => false,
+        };
+        all_in_destination &= in_destination;
+    }
+    if all_in_destination {
+        return Err(ExplorerError::new(
+            ErrorCode::AlreadyExists,
+            "Items are already in that folder",
+            OP,
+        ));
+    }
+    Ok(())
+}
 fn plan_transfer(
     kind: OperationKind,
     sources: &[PathBuf],
@@ -348,5 +398,87 @@ mod tests {
         // Recycling UNC path must be rejected
         let unc = PathBuf::from(r"\\server\share\file.txt");
         assert!(plan_recycle(&[unc]).is_err());
+    }
+
+    fn drop_fixture() -> (tempfile::TempDir, PathBuf, PathBuf, PathBuf) {
+        let dir = tempdir().expect("create temp dir");
+        let src = dir.path().join("src");
+        let dst = dir.path().join("dst");
+        std::fs::create_dir(&src).unwrap();
+        std::fs::create_dir(&dst).unwrap();
+        let file = src.join("a.txt");
+        std::fs::write(&file, "a").unwrap();
+        (dir, src, dst, file)
+    }
+
+    #[test]
+    fn drop_valid_move_and_copy_pass_and_plan() {
+        let (_dir, _src, dst, file) = drop_fixture();
+        let sources = vec![file];
+        for is_move in [true, false] {
+            validate_drop_request(&sources, &dst, is_move).expect("valid drop");
+        }
+        assert_eq!(plan_move(&sources, &dst).unwrap().kind, OperationKind::Move);
+        assert_eq!(plan_copy(&sources, &dst).unwrap().kind, OperationKind::Copy);
+    }
+
+    #[test]
+    fn drop_rejects_empty_selection() {
+        let (_dir, _src, dst, _file) = drop_fixture();
+        let err = validate_drop_request(&[], &dst, true).unwrap_err();
+        assert_eq!(err.code, ErrorCode::UnsupportedPath);
+        assert_eq!(err.user_message, "No items selected to drop");
+    }
+
+    #[test]
+    fn drop_rejects_non_directory_destination() {
+        let (_dir, _src, _dst, file) = drop_fixture();
+        let other = file.parent().unwrap().join("b.txt");
+        std::fs::write(&other, "b").unwrap();
+        let err = validate_drop_request(&[file], &other, true).unwrap_err();
+        assert_eq!(err.code, ErrorCode::UnsupportedPath);
+        assert_eq!(err.user_message, "Drop target is not a folder");
+    }
+
+    #[test]
+    fn drop_rejects_folder_into_itself_and_descendants() {
+        let (_dir, src, dst, _file) = drop_fixture();
+        let nested = src.join("nested").join("deeper");
+        std::fs::create_dir_all(&nested).unwrap();
+        for is_move in [true, false] {
+            for target in [&src, &src.join("nested"), &nested] {
+                let err =
+                    validate_drop_request(std::slice::from_ref(&src), target, is_move).unwrap_err();
+                assert_eq!(err.code, ErrorCode::UnsupportedPath);
+                assert!(
+                    err.user_message
+                        .contains("into itself or one of its subfolders")
+                );
+            }
+        }
+        // A sibling folder is fine.
+        validate_drop_request(std::slice::from_ref(&src), &dst, true).unwrap();
+    }
+
+    #[test]
+    fn drop_rejects_items_already_in_destination() {
+        let (_dir, src, _dst, file) = drop_fixture();
+        let err = validate_drop_request(std::slice::from_ref(&file), &src, true).unwrap_err();
+        assert_eq!(err.code, ErrorCode::AlreadyExists);
+        assert_eq!(err.user_message, "Items are already in that folder");
+        // Folder dropped into its own parent is also a no-op move.
+        let child = src.join("child");
+        std::fs::create_dir(&child).unwrap();
+        let err = validate_drop_request(&[child], &src, true).unwrap_err();
+        assert_eq!(err.user_message, "Items are already in that folder");
+    }
+
+    #[test]
+    fn drop_move_with_one_foreign_item_is_not_rejected_by_precheck() {
+        let (_dir, src, dst, file) = drop_fixture();
+        let foreign = dst.join("x.txt");
+        std::fs::write(&foreign, "x").unwrap();
+        // Mixed parents: precheck passes; the policy preflight stays authoritative.
+        validate_drop_request(&[file, foreign], &src, true).unwrap();
     }
 }
