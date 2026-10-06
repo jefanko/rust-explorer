@@ -77,11 +77,17 @@ impl IndexService {
     /// Remove an indexed root and cancel any active crawl.
     pub fn remove_root(&self, root_id: &str) -> Result<(), ExplorerError> {
         // Cancel any active crawler
-        {
+        let crawl_lock = {
             let mut flags = self.cancel_flags.lock().unwrap();
             if let Some(flag) = flags.remove(root_id) {
                 flag.store(true, Ordering::Relaxed);
             }
+            let mut locks = self.crawl_locks.lock().unwrap();
+            locks.remove(root_id)
+        };
+        // Wait for any active crawler thread for this root to exit cleanly before deleting
+        if let Some(lock) = crawl_lock {
+            let _guard = lock.lock().unwrap();
         }
         self.db.remove_root(root_id)
     }
@@ -97,6 +103,9 @@ impl IndexService {
             )
         })?;
 
+        let _ = self
+            .db
+            .update_root_state(&target.id, crate::db::RootState::Scanning);
         self.trigger_crawl(&target.id, &target.path);
         Ok(())
     }

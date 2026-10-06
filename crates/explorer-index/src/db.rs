@@ -157,6 +157,8 @@ impl IndexDb {
             );
 
             CREATE INDEX IF NOT EXISTS entries_parent ON entries(root_id, parent_id);
+            CREATE INDEX IF NOT EXISTS entries_parent_id ON entries(parent_id);
+            CREATE INDEX IF NOT EXISTS entries_root_id ON entries(root_id);
             CREATE INDEX IF NOT EXISTS entries_extension ON entries(root_id, extension_norm, kind);
             CREATE INDEX IF NOT EXISTS entries_root_seen ON entries(root_id, seen_epoch);
 
@@ -312,19 +314,60 @@ impl IndexDb {
         Ok(list)
     }
 
-    /// Removes an indexed root and all associated metadata and FTS entries via CASCADE.
+    /// Removes an indexed root and all associated metadata and FTS entries.
     pub fn remove_root(&self, root_id: &str) -> Result<(), ExplorerError> {
         let conn = self.conn.lock().unwrap();
-        conn.execute("DELETE FROM roots WHERE id = ?1", params![root_id])
+        // Turn foreign keys off temporarily during mass deletion so SQLite does not perform
+        // redundant recursive O(N^2) parent-child cascade scans when bulk deleting entries.
+        conn.execute_batch("PRAGMA foreign_keys = OFF")
             .map_err(|e| {
                 ExplorerError::new(
                     ErrorCode::Internal,
-                    format!("Failed to delete root {root_id}: {e}"),
+                    format!("Failed to disable foreign keys: {e}"),
                     "IndexDb::remove_root",
                 )
             })?;
+
+        let res = (|| -> Result<(), rusqlite::Error> {
+            conn.execute("DELETE FROM entries WHERE root_id = ?1", params![root_id])?;
+            conn.execute("DELETE FROM roots WHERE id = ?1", params![root_id])?;
+            Ok(())
+        })();
+
+        let _ = conn.execute_batch("PRAGMA foreign_keys = ON");
+
+        res.map_err(|e| {
+            ExplorerError::new(
+                ErrorCode::Internal,
+                format!("Failed to delete root {root_id}: {e}"),
+                "IndexDb::remove_root",
+            )
+        })?;
+
         info!("Removed indexed root {root_id} and all cascaded entries");
         Ok(())
+    }
+
+    /// Check whether a root still exists in the database.
+    pub fn root_exists(&self, root_id: &str) -> Result<bool, ExplorerError> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn
+            .prepare("SELECT 1 FROM roots WHERE id = ?1")
+            .map_err(|e| {
+                ExplorerError::new(
+                    ErrorCode::Internal,
+                    format!("Failed to prepare root existence query: {e}"),
+                    "IndexDb::root_exists",
+                )
+            })?;
+        let exists = stmt.exists(params![root_id]).map_err(|e| {
+            ExplorerError::new(
+                ErrorCode::Internal,
+                format!("Failed to query root existence: {e}"),
+                "IndexDb::root_exists",
+            )
+        })?;
+        Ok(exists)
     }
 
     /// Update the state of an indexed root.

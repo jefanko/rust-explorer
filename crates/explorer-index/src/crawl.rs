@@ -68,9 +68,11 @@ impl MetadataCrawler {
         while let Some((dir, parent_id)) = queue.pop_front() {
             if cancel_flag.load(Ordering::Relaxed) {
                 warn!("Crawl canceled by user or system for root {root_id}");
-                let _ = self
-                    .db
-                    .update_root_state(root_id, RootState::NeedsReconcile);
+                if self.db.root_exists(root_id).unwrap_or(false) {
+                    let _ = self
+                        .db
+                        .update_root_state(root_id, RootState::NeedsReconcile);
+                }
                 stats.elapsed = start_time.elapsed();
                 return Ok(stats);
             }
