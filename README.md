@@ -41,9 +41,16 @@ All filesystem operations, listing logic, change notifications, and search index
 
 ### File Operations
 - **Two-Phase Operation Pipeline**: Mutations follow a strict `Plan → Review → Commit → Revalidate → Execute → Reconcile` lifecycle.
+- **In-App Drag and Drop**: Drag items onto destination folders in the file grid with real-time drop target feedback and cycle/descendant validation.
 - **Durable SQLite Job Journal**: Tracks active and historical operations, recording per-item outcomes and supporting recovery across application restarts.
 - **Windows Explorer Interoperability**: Full clipboard copy, cut, and paste compatibility (<kbd>Ctrl+C</kbd>, <kbd>Ctrl+X</kbd>, <kbd>Ctrl+V</kbd>) via standard Windows Shell formats (`CF_HDROP` and `Preferred DropEffect`).
 - **Single-Instance Lease**: Enforces a single application executor per user session to avoid conflicting concurrent operations.
+
+### File Preview Pane
+- **Multi-Format Preview**: Dedicated collapsible side pane (<kbd>Ctrl+P</kbd> or <kbd>Alt+P</kbd>) inspecting selected items instantly.
+- **Text & Source Files**: UTF-8 and UTF-16 LE/BE decoding, line counts, byte sizes, and binary NUL-byte heuristic detection with safe truncation bounds.
+- **Image Previews**: In-memory Base64 image decoding for PNG, JPEG, GIF, WebP, BMP, ICO, and SVG files up to 8 MiB.
+- **Folder Metadata**: Real-time child item counting and symlink/reparse-point safeguards.
 
 ### Live Directory Synchronization
 - **Real-Time Filesystem Watching**: Monitors active tab directories using Windows `ReadDirectoryChangesW` via `notify`.
@@ -122,6 +129,7 @@ rust-explorer/
 | <kbd>Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>N</kbd> | Create New Folder |
 | <kbd>F5</kbd> | Refresh Directory Listing |
 | <kbd>Ctrl</kbd> + <kbd>A</kbd> | Select All Items |
+| <kbd>Ctrl</kbd> + <kbd>P</kbd> / <kbd>Alt</kbd> + <kbd>P</kbd> | Toggle File Preview Pane |
 | <kbd>Alt</kbd> + <kbd>Enter</kbd> | Open Windows Shell Properties Dialog |
 | <kbd>Escape</kbd> | Clear Selection / Dismiss Active Context Menu or Modal |
 
@@ -193,12 +201,15 @@ To build the release binary and installation packages:
 .\scripts\package.ps1
 ```
 
-Output bundles are generated in `target/release/bundle/`:
-- **NSIS Setup Installer**: `target/release/bundle/nsis/rust-explorer_0.1.0_x64-setup.exe` (per-user installation, no administrative elevation required).
-- **Windows MSI Package**: `target/release/bundle/msi/rust-explorer_0.1.0_x64_en-US.msi`.
-- **Standalone Portable Executable**: `target/release/rust-explorer.exe`.
+Packaging builds the desktop application in release mode and stages artifacts into `target/release-artifacts/`:
+- **NSIS Setup Installer**: `rust-explorer_0.1.0_x64-setup.exe` (per-user installation, no administrative elevation required).
+- **Windows MSI Package**: `rust-explorer_0.1.0_x64_en-US.msi`.
+- **Standalone Portable Executable**: `rust-explorer.exe`.
 
-Release checksums and build metadata are located in `artifacts/release/`.
+### Release Integrity & Metadata
+- **Dynamic Build Metadata (`BUILD_METADATA.json`)**: Generated automatically during packaging, capturing Git commit SHA, UTC build timestamp, target triple (`x86_64-pc-windows-msvc`), compiler/toolchain versions (`rustc`, `node`, `npm`, Tauri CLI), and SHA-256 hashes with byte sizes for all produced binaries.
+- **BOM-Free Checksums (`SHA256SUMS.txt`)**: Standard SHA-256 checksum list written in clean UTF-8 without byte order marks.
+- **Authenticode Code Signing**: If code signing secrets (`WINDOWS_CERT_PFX_BASE64` and `WINDOWS_CERT_PASSWORD`) are configured in the environment, `package.ps1` automatically signs all staged `.exe` and `.msi` artifacts via `signtool.exe` with RFC 3161 timestamps and verifies Authenticode signature statuses.
 
 ---
 

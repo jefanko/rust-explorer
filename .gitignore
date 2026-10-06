@@ -59,6 +59,8 @@ artifacts/*
 !artifacts/benchmarks/summary.md
 !artifacts/release/
 !artifacts/release/**
+artifacts/release/BUILD_METADATA.json
+artifacts/release/SHA256SUMS.txt
 
 # ==========================================
 # Operating System & Editor Files

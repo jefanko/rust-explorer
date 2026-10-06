@@ -1,3 +1,4 @@
+use crate::versions;
 use std::process::Command;
 
 pub fn run() -> Result<(), Box<dyn std::error::Error>> {
@@ -54,6 +55,18 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         Ok(()) => println!(" [OK] SQLite bundled with FTS5 trigram support working"),
         Err(e) => {
             eprintln!(" [FAIL] SQLite FTS5 trigram probe failed: {e}");
+            all_ok = false;
+        }
+    }
+
+    // 4. Version consistency across Cargo/npm/Tauri manifests
+    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."));
+    match versions::check_repo(repo_root) {
+        Ok(version) => println!(" [OK] version consistent across manifests: {version}"),
+        Err(msg) => {
+            eprintln!(" [FAIL] {msg}");
             all_ok = false;
         }
     }

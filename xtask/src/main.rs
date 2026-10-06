@@ -2,6 +2,7 @@ mod bench;
 mod doctor;
 mod fixtures;
 mod smoke;
+mod versions;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = std::env::args().skip(1);
