@@ -8,7 +8,7 @@ license.workspace = true
 explorer-domain.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
-windows-core = "0.58"
+windows-core = "0.62"
 windows = { workspace = true, features = [
     "implement",
     "Win32_Foundation",
