@@ -5,16 +5,15 @@ if (Test-Path $cargoBin) {
     $env:Path = "$cargoBin;$env:Path"
 }
 
-Write-Host "=== Rust Explorer Packaging & Installer Build ==="
-Write-Host "Node version: $(node --version)"
+Write-Host "=== Rust Explorer Packaging & Native Build ==="
 Write-Host "Cargo version: $(cargo --version)"
 
-# Build release desktop bundle
-Write-Host "`n--> Building Tauri release bundle..."
-npx --workspace=@rust-explorer/desktop tauri build
+# Build release native desktop binary
+Write-Host "`n--> Building native Win32 release binary..."
+cargo build --release -p rust-explorer
 
 if ($LASTEXITCODE -ne 0) {
-    Write-Error "Tauri build failed with exit code $LASTEXITCODE"
+    Write-Error "Native build failed with exit code $LASTEXITCODE"
     exit $LASTEXITCODE
 }
 
@@ -26,16 +25,10 @@ New-Item -ItemType Directory -Force -Path $stageDir | Out-Null
 $exe = Join-Path $outputDir "rust-explorer.exe"
 if (Test-Path $exe) {
     Copy-Item $exe -Destination $stageDir -Force
-}
-
-$nsisFiles = Get-ChildItem -Path (Join-Path $outputDir "bundle\nsis\*.exe") -ErrorAction SilentlyContinue
-foreach ($f in $nsisFiles) {
-    Copy-Item $f.FullName -Destination $stageDir -Force
-}
-
-$msiFiles = Get-ChildItem -Path (Join-Path $outputDir "bundle\msi\*.msi") -ErrorAction SilentlyContinue
-foreach ($f in $msiFiles) {
-    Copy-Item $f.FullName -Destination $stageDir -Force
+    Write-Host "Staged: $exe -> $stageDir"
+} else {
+    Write-Error "Release executable not found at $exe"
+    exit 1
 }
 
 # Optional code signing (active only if secrets are configured)
@@ -85,14 +78,10 @@ $utf8NoBom = New-Object Text.UTF8Encoding $false
 
 # Generate BUILD_METADATA.json from real artifacts
 $rootPackage = Get-Content (Join-Path $PSScriptRoot "..\package.json") -Raw | ConvertFrom-Json
-$desktopPackage = Get-Content (Join-Path $PSScriptRoot "..\apps\desktop\package.json") -Raw | ConvertFrom-Json
 $gitSha = (git rev-parse HEAD 2>$null)
 if (!$gitSha) { $gitSha = "unknown" }
 $buildDate = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
 $rustcVer = (rustc --version 2>$null)
-$nodeVer = (node --version 2>$null)
-$npmVer = (npm --version 2>$null)
-$tauriVer = $desktopPackage.devDependencies.'@tauri-apps/cli'
 
 $artifactList = foreach ($item in $stagedBinaries) {
     $format = if ($item.Extension -eq ".msi") {
@@ -103,34 +92,25 @@ $artifactList = foreach ($item in $stagedBinaries) {
         "executable"
     }
     $hash = (Get-FileHash -Path $item.FullName -Algorithm SHA256).Hash.ToUpper()
-    [ordered]@{
-        fileName = $item.Name
+    [PSCustomObject]@{
+        name = $item.Name
         format = $format
+        size_bytes = $item.Length
         sha256 = $hash
-        sizeBytes = $item.Length
     }
 }
 
 $metadata = [ordered]@{
-    productName = "Rust Explorer"
     version = $rootPackage.version
-    commitSha = $gitSha
-    buildProfile = "release"
-    targetTriple = "x86_64-pc-windows-msvc"
-    rustcVersion = $rustcVer
-    nodeVersion = $nodeVer
-    npmVersion = $npmVer
-    tauriCliVersion = $tauriVer
-    buildDate = $buildDate
-    artifacts = $artifactList
+    git_sha = $gitSha
+    build_date = $buildDate
+    target = "x86_64-pc-windows-msvc"
+    rustc_version = $rustcVer
+    ui_technology = "Native Win32 Common Controls (Pure Rust)"
+    artifacts = @($artifactList)
 }
 
-$metadataJson = $metadata | ConvertTo-Json -Depth 5
-$metadataPath = Join-Path $stageDir "BUILD_METADATA.json"
-[IO.File]::WriteAllText($metadataPath, $metadataJson + "`n", $utf8NoBom)
-
-Write-Host "`n[OK] Release packaging completed successfully."
-Write-Host "Staged release artifacts in: $stageDir"
-Get-Content $checksumPath
-Write-Host "`nGenerated metadata:"
-Get-Content $metadataPath
+$metaPath = Join-Path $stageDir "BUILD_METADATA.json"
+$metadata | ConvertTo-Json -Depth 5 | Set-Content -Path $metaPath -Encoding utf8
+Write-Host "`nArtifacts staged successfully in: $stageDir"
+Write-Host "Generated: SHA256SUMS.txt, BUILD_METADATA.json"

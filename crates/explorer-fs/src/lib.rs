@@ -39,6 +39,16 @@ impl FolderService {
 
     /// Navigates to a folder path, enumerates its contents, and caches the snapshot.
     pub fn navigate(&self, target_path: &Path) -> Result<NavigationResponse, ExplorerError> {
+        self.navigate_with(target_path, true)
+    }
+
+    /// Navigates while deciding up front whether hidden/system entries are part of
+    /// the snapshot. Filtering at enumeration keeps row indices and page offsets aligned.
+    pub fn navigate_with(
+        &self,
+        target_path: &Path,
+        include_hidden: bool,
+    ) -> Result<NavigationResponse, ExplorerError> {
         let normalized_target = explorer_win::path::normalize_drive_root(target_path);
         let target_path = normalized_target.as_path();
         validate_safe_path(target_path)?;
@@ -51,7 +61,7 @@ impl FolderService {
         let generation = self.generation_counter.fetch_add(1, Ordering::SeqCst);
         let path_display = to_display_string(&canonical);
 
-        let entries = enumerate_directory(&canonical, Some(&folder_token))?;
+        let entries = enumerate_directory(&canonical, Some(&folder_token), include_hidden)?;
         let total_entries = entries.len();
 
         let snapshot = FolderSnapshot::new(
@@ -158,10 +168,7 @@ impl FolderService {
         item_token: &ItemToken,
     ) -> Option<PathBuf> {
         let snaps = self.snapshots.read().ok()?;
-        snaps
-            .get(folder_token)?
-            .resolve_item(item_token)
-            .map(|p| p.to_path_buf())
+        snaps.get(folder_token)?.resolve_item(item_token)
     }
 
     /// Retrieves the path of a cached folder token.

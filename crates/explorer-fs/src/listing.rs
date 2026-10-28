@@ -59,56 +59,81 @@ pub fn natural_cmp(a: &str, b: &str) -> Ordering {
     }
 }
 
-/// Sorts file entries: directories first, then by chosen column, then natural name tie-breaker.
-pub fn sort_entries(entries: &mut [FileEntry], column: SortColumn, direction: SortDirection) {
-    entries.sort_by(|a, b| {
-        // Rule 1: Directories always come before files
-        let a_is_dir = matches!(a.kind, EntryKind::Directory);
-        let b_is_dir = matches!(b.kind, EntryKind::Directory);
+/// Compares two entries for ordering: directories first, then chosen column, then natural name tie-breaker.
+pub fn compare_entries(
+    a: &FileEntry,
+    b: &FileEntry,
+    column: SortColumn,
+    direction: SortDirection,
+) -> Ordering {
+    let a_is_dir = matches!(a.kind, EntryKind::Directory);
+    let b_is_dir = matches!(b.kind, EntryKind::Directory);
 
-        match (a_is_dir, b_is_dir) {
-            (true, false) => Ordering::Less,
-            (false, true) => Ordering::Greater,
-            _ => {
-                // Both are dirs or both are files: apply chosen column sort
-                let ord = match column {
-                    SortColumn::Name => natural_cmp(&a.display_name, &b.display_name),
-                    SortColumn::Type => {
-                        let ext_cmp = a.extension.to_lowercase().cmp(&b.extension.to_lowercase());
-                        if ext_cmp == Ordering::Equal {
-                            natural_cmp(&a.display_name, &b.display_name)
-                        } else {
-                            ext_cmp
-                        }
+    match (a_is_dir, b_is_dir) {
+        (true, false) => Ordering::Less,
+        (false, true) => Ordering::Greater,
+        _ => {
+            // Both are dirs or both are files: apply chosen column sort
+            let ord = match column {
+                SortColumn::Name => natural_cmp(&a.display_name, &b.display_name),
+                SortColumn::Type => {
+                    let ext_cmp = a.extension.to_lowercase().cmp(&b.extension.to_lowercase());
+                    if ext_cmp == Ordering::Equal {
+                        natural_cmp(&a.display_name, &b.display_name)
+                    } else {
+                        ext_cmp
                     }
-                    SortColumn::Size => match (a.size_bytes, b.size_bytes) {
-                        (Some(sa), Some(sb)) => sa.cmp(&sb),
-                        (Some(_), None) => Ordering::Less,
-                        (None, Some(_)) => Ordering::Greater,
-                        (None, None) => natural_cmp(&a.display_name, &b.display_name),
-                    },
-                    SortColumn::Modified => match (a.modified_filetime, b.modified_filetime) {
-                        (Some(ma), Some(mb)) => ma.cmp(&mb),
-                        (Some(_), None) => Ordering::Less,
-                        (None, Some(_)) => Ordering::Greater,
-                        (None, None) => natural_cmp(&a.display_name, &b.display_name),
-                    },
-                };
-
-                let directed_ord = match direction {
-                    SortDirection::Ascending => ord,
-                    SortDirection::Descending => ord.reverse(),
-                };
-
-                // Deterministic tie-breaker
-                if directed_ord == Ordering::Equal {
-                    a.display_name.cmp(&b.display_name)
-                } else {
-                    directed_ord
                 }
+                SortColumn::Size => match (a.size_bytes, b.size_bytes) {
+                    (Some(sa), Some(sb)) => sa.cmp(&sb),
+                    (Some(_), None) => Ordering::Less,
+                    (None, Some(_)) => Ordering::Greater,
+                    (None, None) => natural_cmp(&a.display_name, &b.display_name),
+                },
+                SortColumn::Modified => match (a.modified_filetime, b.modified_filetime) {
+                    (Some(ma), Some(mb)) => ma.cmp(&mb),
+                    (Some(_), None) => Ordering::Less,
+                    (None, Some(_)) => Ordering::Greater,
+                    (None, None) => natural_cmp(&a.display_name, &b.display_name),
+                },
+            };
+
+            let directed_ord = match direction {
+                SortDirection::Ascending => ord,
+                SortDirection::Descending => ord.reverse(),
+            };
+
+            // Deterministic tie-breaker
+            if directed_ord == Ordering::Equal {
+                a.display_name.cmp(&b.display_name)
+            } else {
+                directed_ord
             }
         }
+    }
+}
+
+/// Sorts file entries in place: directories first, then by chosen column, then natural name tie-breaker.
+pub fn sort_entries(entries: &mut [FileEntry], column: SortColumn, direction: SortDirection) {
+    entries.sort_by(|a, b| compare_entries(a, b, column, direction));
+}
+
+/// Sorts a vector of entry indices without duplicating FileEntry structs.
+pub fn sort_indices(
+    entries: &[FileEntry],
+    column: SortColumn,
+    direction: SortDirection,
+) -> Vec<u32> {
+    let mut indices: Vec<u32> = (0..entries.len() as u32).collect();
+    indices.sort_by(|&a, &b| {
+        compare_entries(
+            &entries[a as usize],
+            &entries[b as usize],
+            column,
+            direction,
+        )
     });
+    indices
 }
 
 #[cfg(test)]
@@ -156,5 +181,34 @@ mod tests {
         assert_eq!(entries[1].display_name, "beta_folder");
         assert_eq!(entries[2].display_name, "apple.txt");
         assert_eq!(entries[3].display_name, "zebra.txt");
+    }
+
+    #[test]
+    fn test_sort_indices_matches_sort_entries() {
+        let entries = vec![
+            make_test_entry("file10.txt", EntryKind::File, Some(100)),
+            make_test_entry("dir_b", EntryKind::Directory, None),
+            make_test_entry("file2.txt", EntryKind::File, Some(200)),
+            make_test_entry("dir_a", EntryKind::Directory, None),
+        ];
+
+        let mut sorted_entries = entries.clone();
+        sort_entries(
+            &mut sorted_entries,
+            SortColumn::Name,
+            SortDirection::Ascending,
+        );
+
+        let indices = sort_indices(&entries, SortColumn::Name, SortDirection::Ascending);
+        let from_indices: Vec<String> = indices
+            .iter()
+            .map(|&i| entries[i as usize].display_name.clone())
+            .collect();
+        let from_sorted: Vec<String> = sorted_entries
+            .iter()
+            .map(|e| e.display_name.clone())
+            .collect();
+
+        assert_eq!(from_indices, from_sorted);
     }
 }

@@ -13,9 +13,15 @@ use windows::Win32::Storage::FileSystem::{
 use windows::core::PCWSTR;
 
 /// Enumerates entries in a directory using native Win32 FindFirstFileExW/FindNextFileW.
+///
+/// When `include_hidden` is false, hidden and system entries are dropped at the
+/// source so the snapshot (and therefore every page index) only contains rows the
+/// view will actually show. Filtering hidden items in the view instead would make
+/// row indices and page offsets diverge.
 pub fn enumerate_directory(
     dir_path: &Path,
     parent_token: Option<&FolderToken>,
+    include_hidden: bool,
 ) -> Result<Vec<FileEntry>, ExplorerError> {
     let normalized = normalize_drive_root(dir_path);
     let dir_path = normalized.as_path();
@@ -93,6 +99,14 @@ pub fn enumerate_directory(
             let is_hidden = (attrs & FILE_ATTRIBUTE_HIDDEN.0) != 0;
             let is_readonly = (attrs & FILE_ATTRIBUTE_READONLY.0) != 0;
             let is_system = (attrs & FILE_ATTRIBUTE_SYSTEM.0) != 0;
+
+            if !include_hidden && (is_hidden || is_system) {
+                let next_ok = unsafe { FindNextFileW(handle, &mut find_data) };
+                if next_ok.is_err() {
+                    break;
+                }
+                continue;
+            }
 
             let kind = if is_reparse {
                 EntryKind::ReparsePoint
@@ -172,7 +186,7 @@ mod tests {
         File::create(path.join("file2.log")).expect("create file2");
         fs::create_dir(path.join("subfolder")).expect("create subfolder");
 
-        let entries = enumerate_directory(path, None).expect("enumerate");
+        let entries = enumerate_directory(path, None, true).expect("enumerate");
         assert_eq!(entries.len(), 3);
 
         let names: Vec<String> = entries.iter().map(|e| e.display_name.clone()).collect();

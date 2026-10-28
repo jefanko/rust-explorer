@@ -15,8 +15,8 @@ use std::path::Path;
 const SOURCES: &[(&str, SourceKind)] = &[
     ("Cargo.toml", SourceKind::CargoWorkspace),
     ("package.json", SourceKind::Json),
-    ("apps/desktop/package.json", SourceKind::Json),
-    ("apps/desktop/src-tauri/tauri.conf.json", SourceKind::Json),
+    ("legacy/desktop/package.json", SourceKind::Json),
+    ("legacy/desktop/src-tauri/tauri.conf.json", SourceKind::Json),
 ];
 
 #[derive(Clone, Copy, Debug)]

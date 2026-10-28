@@ -2,9 +2,10 @@
 resolver = "3"
 members = [
     "crates/*",
-    "apps/desktop/src-tauri",
+    "apps/native-win32",
     "xtask",
 ]
+default-members = ["apps/native-win32"]
 
 [workspace.package]
 version = "0.1.0"
@@ -22,6 +23,7 @@ explorer-jobs = { path = "crates/explorer-jobs" }
 explorer-index = { path = "crates/explorer-index" }
 explorer-watch = { path = "crates/explorer-watch" }
 explorer-store = { path = "crates/explorer-store" }
+explorer-app = { path = "crates/explorer-app" }
 
 # Serialization and IDs
 serde = { version = "1.0", features = ["derive"] }

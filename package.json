@@ -4,7 +4,7 @@
   "private": true,
   "packageManager": "npm@10.9.3",
   "workspaces": [
-    "apps/desktop"
+    "legacy/desktop"
   ],
   "scripts": {
     "dev:desktop": "npm run --workspace=@rust-explorer/desktop dev:desktop",

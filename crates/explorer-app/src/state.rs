@@ -72,6 +72,7 @@ pub fn application_state_dir() -> Result<PathBuf, ExplorerError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
     #[test]
     fn corrupt_durable_state_never_creates_an_available_executor() {
         let root = tempfile::tempdir().unwrap();

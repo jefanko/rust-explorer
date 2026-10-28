@@ -78,7 +78,7 @@ impl MetadataCrawler {
             }
 
             // Enumerate directory entries using Win32 API
-            let entries = match enumerate_directory(&dir, None) {
+            let entries = match enumerate_directory(&dir, None, true) {
                 Ok(entries) => entries,
                 Err(err) => {
                     // Preserve old entries for directories whose contents were not enumerated.

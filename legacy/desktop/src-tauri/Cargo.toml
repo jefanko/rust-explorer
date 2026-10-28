@@ -23,6 +23,7 @@ explorer-jobs = { workspace = true }
 explorer-index = { workspace = true }
 explorer-watch = { workspace = true }
 explorer-store = { workspace = true }
+explorer-app = { workspace = true }
 
 tauri = { version = "2.2", features = [] }
 serde = { workspace = true }
