@@ -18,7 +18,7 @@ explorer-app = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
-windows-core = "0.58"
+windows-core = "0.100"
 windows = { workspace = true, features = [
     "implement",
     "Win32_Foundation",
