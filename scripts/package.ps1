@@ -18,8 +18,13 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 # Stage release artifacts
-$outputDir = Resolve-Path (Join-Path $PSScriptRoot "..\target\release")
-$stageDir = Join-Path $outputDir "..\release-artifacts"
+$targetDir = Join-Path $PSScriptRoot "..\target"
+$outputDir = Join-Path $targetDir "release"
+$stageDir = Join-Path $targetDir "release-artifacts"
+
+if (Test-Path $stageDir) {
+    Remove-Item (Join-Path $stageDir "*") -Recurse -Force
+}
 New-Item -ItemType Directory -Force -Path $stageDir | Out-Null
 
 $exe = Join-Path $outputDir "rust-explorer.exe"

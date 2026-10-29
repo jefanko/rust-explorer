@@ -130,7 +130,7 @@ fn resolve_symbol(address: u64) -> String {
         return String::new();
     }
     // SYMBOL_INFOW ends in a one-element name array; over-allocate a real buffer.
-    let mut raw = vec![0u64; (std::mem::size_of::<SYMBOL_INFOW>() + 1024 + 7) / 8];
+    let mut raw = vec![0u64; (std::mem::size_of::<SYMBOL_INFOW>() + 1024).div_ceil(8)];
     let symbol = raw.as_mut_ptr() as *mut SYMBOL_INFOW;
     unsafe {
         (*symbol).SizeOfStruct = std::mem::size_of::<SYMBOL_INFOW>() as u32;

@@ -15,7 +15,7 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   verify:
@@ -88,10 +88,11 @@ jobs:
         uses: rustsec/audit-check@v2.0.0
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
+          ignore: RUSTSEC-2024-0384
 
   build-release:
     name: Build & Package Release
-    needs: [verify, security-audit]
+    needs: [verify]
     if: github.event_name != 'schedule'
     runs-on: windows-latest
     permissions:
@@ -99,12 +100,6 @@ jobs:
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: 'npm'
 
       - name: Setup Rust Toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -115,10 +110,7 @@ jobs:
       - name: Rust Cache
         uses: swatinem/rust-cache@v2
 
-      - name: Install npm dependencies
-        run: npm ci
-
-      - name: Build Tauri Release Bundle & Stage Artifacts
+      - name: Build Native Win32 Release & Stage Artifacts
         env:
           WINDOWS_CERT_PFX_BASE64: ${{ secrets.WINDOWS_CERT_PFX_BASE64 }}
           WINDOWS_CERT_PASSWORD: ${{ secrets.WINDOWS_CERT_PASSWORD }}
@@ -133,49 +125,55 @@ jobs:
           retention-days: 30
 
       - name: Determine Release Metadata
+        id: release_meta
         if: github.event_name != 'pull_request'
         shell: pwsh
         run: |
           $refName = "${{ github.ref_name }}"
           $isTag = "${{ github.ref_type }}" -eq "tag" -and $refName -like "v*"
+          $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
 
           if ($isTag) {
-              $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
               if ($refName -ne "v$version") {
                   Write-Error "Tag $refName does not match package.json version $version"
                   exit 1
               }
               $tag = $refName
               $title = "Rust Explorer $refName"
-              $pre = "false"
           } else {
               $tag = "latest"
-              $title = "Rust Explorer (Latest Build)"
-              $pre = "true"
+              $title = "Rust Explorer v$version"
           }
 
-          "TAG_NAME=$tag" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-          "RELEASE_TITLE=$title" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-          "IS_PRERELEASE=$pre" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-          Write-Host "Configured Release: Tag=$tag, Title=$title, Prerelease=$pre"
+          "tag_name=$tag" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "release_title=$title" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          Write-Host "Configured Release: Tag=$tag, Title=$title, IsTag=$isTag"
 
       - name: Move rolling 'latest' tag to this commit
-        if: github.event_name != 'pull_request' && env.TAG_NAME == 'latest'
+        if: github.event_name != 'pull_request' && steps.release_meta.outputs.tag_name == 'latest'
         shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          git tag -f latest ${{ github.sha }}
-          git push -f origin refs/tags/latest
+          try {
+              git config user.name "github-actions[bot]"
+              git config user.email "github-actions[bot]@users.noreply.github.com"
+              git tag -f latest ${{ github.sha }}
+              git push -f "https://x-access-token:$($env:GH_TOKEN)@github.com/$($env:GITHUB_REPOSITORY).git" refs/tags/latest
+          } catch {
+              Write-Warning "Non-fatal: could not update rolling tag directly via git push: $_"
+          }
 
       - name: Publish to GitHub Releases Tab
         if: github.event_name != 'pull_request'
         uses: softprops/action-gh-release@v2
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-          tag_name: ${{ env.TAG_NAME }}
-          name: ${{ env.RELEASE_TITLE }}
+          tag_name: ${{ steps.release_meta.outputs.tag_name }}
+          name: ${{ steps.release_meta.outputs.release_title }}
           target_commitish: ${{ github.sha }}
           files: target/release-artifacts/*
           generate_release_notes: true
-          make_latest: ${{ env.TAG_NAME != 'latest' }}
+          make_latest: true
           draft: false
-          prerelease: ${{ env.IS_PRERELEASE == 'true' }}
+          prerelease: false

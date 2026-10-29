@@ -55,7 +55,7 @@ impl SidebarManager {
                 self.hwnd_tree,
                 TVM_DELETEITEM,
                 WPARAM(0),
-                LPARAM(TVI_ROOT.0 as isize),
+                LPARAM(TVI_ROOT.0),
             );
         }
         self.item_paths.clear();
@@ -82,7 +82,7 @@ impl SidebarManager {
                 self.hwnd_tree,
                 TVM_EXPAND,
                 WPARAM(TVE_EXPAND.0 as usize),
-                LPARAM(root_qa.0 as isize),
+                LPARAM(root_qa.0),
             );
         }
 
@@ -107,7 +107,7 @@ impl SidebarManager {
                 self.hwnd_tree,
                 TVM_EXPAND,
                 WPARAM(TVE_EXPAND.0 as usize),
-                LPARAM(root_pc.0 as isize),
+                LPARAM(root_pc.0),
             );
         }
 
@@ -126,7 +126,7 @@ impl SidebarManager {
                 self.hwnd_tree,
                 TVM_EXPAND,
                 WPARAM(TVE_EXPAND.0 as usize),
-                LPARAM(root_fav.0 as isize),
+                LPARAM(root_fav.0),
             );
         }
     }
@@ -164,13 +164,13 @@ impl SidebarManager {
         };
 
         if let Some(p) = path {
-            self.item_paths.insert(hitem.0 as isize, p);
+            self.item_paths.insert(hitem.0, p);
         }
 
         hitem
     }
 
     pub fn get_path_for_item(&self, hitem: HTREEITEM) -> Option<PathBuf> {
-        self.item_paths.get(&(hitem.0 as isize)).cloned()
+        self.item_paths.get(&hitem.0).cloned()
     }
 }

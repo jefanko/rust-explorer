@@ -1627,7 +1627,7 @@ unsafe extern "system" fn wnd_proc_inner(
                         TVS_HASBUTTONS
                             | TVS_SHOWSELALWAYS
                             | TVS_FULLROWSELECT
-                            | TVS_DISABLEDRAGDROP as u32,
+                            | TVS_DISABLEDRAGDROP,
                     ),
                 0,
                 0,
@@ -1651,7 +1651,7 @@ unsafe extern "system" fn wnd_proc_inner(
                 WS_CHILD
                     | WS_VISIBLE
                     | WS_CLIPSIBLINGS
-                    | WINDOW_STYLE(LVS_REPORT | LVS_OWNERDATA | LVS_SHOWSELALWAYS as u32),
+                    | WINDOW_STYLE(LVS_REPORT | LVS_OWNERDATA | LVS_SHOWSELALWAYS),
                 0,
                 0,
                 0,
@@ -1723,7 +1723,7 @@ unsafe extern "system" fn wnd_proc_inner(
                 WINDOW_EX_STYLE::default(),
                 STATUSCLASSNAMEW,
                 PCWSTR::null(),
-                WS_CHILD | WS_VISIBLE | WINDOW_STYLE(SBARS_SIZEGRIP as u32),
+                WS_CHILD | WS_VISIBLE | WINDOW_STYLE(SBARS_SIZEGRIP),
                 0,
                 0,
                 0,
@@ -1966,10 +1966,10 @@ unsafe extern "system" fn wnd_proc_inner(
                 if nmhdr.hwndFrom == state.hwnd_sidebar && nmhdr.code == TVN_SELCHANGEDW {
                     let nmtv = &*(lparam.0 as *const NMTREEVIEWW);
                     let hitem = nmtv.itemNew.hItem;
-                    if let Some(ref sb) = state.sidebar_manager {
-                        if let Some(path) = sb.get_path_for_item(hitem) {
-                            state.trigger_navigate(path);
-                        }
+                    if let Some(ref sb) = state.sidebar_manager
+                        && let Some(path) = sb.get_path_for_item(hitem)
+                    {
+                        state.trigger_navigate(path);
                     }
                     return LRESULT(0);
                 }
@@ -2168,22 +2168,22 @@ unsafe extern "system" fn wnd_proc_inner(
                                 0,
                                 state.active_tab().view_epoch,
                             );
-                            if !env.is_stale(&active_id) {
-                                if let Ok(page) = env.result {
-                                    let before = state.active_tab().visible_item_count();
-                                    state.active_tab_mut().apply_page(page);
-                                    let count = state.active_tab().visible_item_count();
-                                    if count != before {
-                                        let _ = SendMessageW(
-                                            state.hwnd_list,
-                                            LVM_SETITEMCOUNT,
-                                            WPARAM(count),
-                                            LPARAM(1),
-                                        );
-                                        state.update_status_bar();
-                                    }
-                                    let _ = InvalidateRect(state.hwnd_list, None, true);
+                            if !env.is_stale(&active_id)
+                                && let Ok(page) = env.result
+                            {
+                                let before = state.active_tab().visible_item_count();
+                                state.active_tab_mut().apply_page(page);
+                                let count = state.active_tab().visible_item_count();
+                                if count != before {
+                                    let _ = SendMessageW(
+                                        state.hwnd_list,
+                                        LVM_SETITEMCOUNT,
+                                        WPARAM(count),
+                                        LPARAM(1),
+                                    );
+                                    state.update_status_bar();
                                 }
+                                let _ = InvalidateRect(state.hwnd_list, None, true);
                             }
                         }
                         UiEvent::NavigationReady(env) | UiEvent::RefreshReady(env) => {
@@ -2235,10 +2235,10 @@ unsafe extern "system" fn wnd_proc_inner(
                             }
                         }
                         UiEvent::PreviewReady(env) => {
-                            if let Ok(data) = env.result {
-                                if let Some(ref mut pane) = state.preview_pane {
-                                    pane.show_preview(&data);
-                                }
+                            if let Ok(data) = env.result
+                                && let Some(ref mut pane) = state.preview_pane
+                            {
+                                pane.show_preview(&data);
                             }
                         }
                         UiEvent::JobCompleted(env) => {
