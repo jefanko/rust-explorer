@@ -24,6 +24,8 @@ pub enum UiEvent {
     SearchReady(CompletionEnvelope<SearchResponse>),
     PreviewReady(CompletionEnvelope<PreviewData>),
     JobCompleted(CompletionEnvelope<JobSummary>),
+    SearchIndexFailed(ExplorerError),
+    StatusMessage(String),
     OperationError(ExplorerError),
 }
 

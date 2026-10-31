@@ -10,7 +10,7 @@ but it is no longer part of the default build.
 
 ## Status
 
-Usable for everyday browsing. Folder listing, tabs, history, sorting, filtering,
+Usable for everyday browsing. Folder listing, tabs, history, sorting, deep search,
 previews and the usual file operations work. The rough edges are listed under
 [Known issues](#known-issues).
 
@@ -46,7 +46,7 @@ yours; it is not benchmarked in CI.
 ## What it does
 
 **Browsing.** Owner-data list view with shell icons, sortable columns, natural name
-sorting and a live filter box. Folders are enumerated with `FindFirstFileExW` and
+sorting and a deep indexed search box. Folders are enumerated with `FindFirstFileExW` and
 cached, so scrolling a 100k-entry directory does not hit the disk again.
 
 **Navigation.** Tabs, back/forward/up, and an address bar that accepts `C:\...`,
@@ -63,12 +63,19 @@ show format and size; they are not drawn yet.
 **Live updates.** The open folder is watched with `ReadDirectoryChangesW` and the view
 refreshes after a short debounce.
 
-**Search.** The in-folder filter runs in memory over the loaded rows. Global search
-uses a bundled SQLite FTS5 trigram index and currently reports a match count in the
-status bar instead of showing results.
+**Search.** The search box runs a deep filename search across every indexed root using a
+bundled SQLite FTS5 trigram index. Results appear in the main table with Name, Location,
+Size and Date modified; double-click or Enter opens a hit, and the context menu offers
+Open containing folder and Copy path. If no root is indexed, the current folder is
+indexed automatically and results update live while the crawl runs. Queries support
+`ext:rs`, `type:folder` and `"exact phrases"`; the view shows at most 1,000 matches.
 
-**Dark mode.** Title bar via DWM, and native dark themes for the list, header, tree,
-tabs and edit boxes. The status bar stays light.
+**Dark mode.** A persisted System / Light / Dark preference. System follows the OS
+theme; the title bar, toolbar, address/search boxes, list, header, sidebar, tabs,
+status bar, preview pane, context menus and dialogs all render dark. Windows 10 has
+no native dark theme for the tab strip or status bar, so those are owner-drawn; the
+tree uses direct colors. High contrast falls back to system colors, and gridlines are
+hidden in dark mode.
 
 ![Dark theme](assets/screenshots/shell-dark.png)
 
@@ -113,11 +120,12 @@ there keeps a second launch from opening a second window.
 ## Known issues
 
 - Internal drag and drop is not implemented. Use clipboard copy/cut/paste.
-- The in-folder filter only matches rows that are already paged in, so it can miss
-  entries in very large folders.
-- Global search has no results view, only a count in the status bar.
+- Deep search covers indexed filenames only, not file contents.
+- The search results view shows at most the first 1,000 matches; refine the query
+  beyond that.
 - Image preview shows metadata only.
-- Header and status bar keep the light system theme in dark mode.
+- Scrollbars keep the system theme; Windows draws them outside the control's dark
+  theme.
 - Indexing a large root (a whole drive) can keep one core busy for a while. Startup
   resumes interrupted crawls but no longer re-crawls healthy roots.
 
