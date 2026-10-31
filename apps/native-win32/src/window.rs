@@ -8,17 +8,19 @@ use crate::dialogs::{
 use crate::dispatcher::{SharedDispatcher, UiEvent, WM_APP_WAKEUP};
 use crate::presenter::{PAGE_SIZE, TabPresenter};
 use crate::preview::PreviewPane;
-use crate::resources::{SafeBrush, SafeFont};
+use crate::resources::SafeFont;
+use crate::search::{self, SearchView};
 use crate::sidebar::SidebarManager;
+use crate::theme::{self, DARK_PANEL, ThemeControl, ThemePreference, ThemeState};
 use explorer_app::requests::{CompletionEnvelope, PageRequest, RequestIdentity};
 use explorer_app::state::AppState;
 use explorer_domain::ids::{ItemToken, SessionId};
 use explorer_domain::models::{EntryKind, SortColumn, SortDirection};
+use explorer_index::RootState;
 use explorer_win::known_folders::{get_logical_drives, get_standard_known_folders};
 use std::path::PathBuf;
 use std::sync::Arc;
-use windows::Win32::Foundation::{BOOL, COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM};
-use windows::Win32::Graphics::Dwm::{DWMWA_USE_IMMERSIVE_DARK_MODE, DwmSetWindowAttribute};
+use windows::Win32::Foundation::{COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::UI::Controls::*;
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
@@ -55,13 +57,16 @@ pub struct WindowState {
     pub font: Option<SafeFont>,
     /// Segoe MDL2 Assets, used for the toolbar arrow glyphs.
     pub nav_font: Option<SafeFont>,
-    pub is_dark_mode: bool,
+    pub theme: ThemeState,
+    pub theme_applying: bool,
+    pub status_parts: [String; 3],
+    pub search: SearchView,
     pub next_tab_id: u64,
     pub watch_refresh_pending: bool,
     pub icon_cache: std::collections::HashMap<String, i32>,
     pub status_message: Option<String>,
-    pub dark_background: Option<SafeBrush>,
-    pub dark_control: Option<SafeBrush>,
+    /// Owned buffer for `LVM_SETEMPTYTEXT`, which stores the pointer.
+    pub empty_text: Vec<u16>,
     /// Error captured while a modal dialog was open; surfaced afterwards.
     pub pending_error: Option<String>,
 }
@@ -73,6 +78,10 @@ const LVM_SETEMPTYTEXT: u32 = 0x1000 + 204;
 const WATCH_REFRESH_TIMER: usize = 1;
 /// Message lifetime for transient status-bar feedback.
 const STATUS_MESSAGE_TIMER: usize = 2;
+/// Debounce for the deep indexed search box.
+const SEARCH_DEBOUNCE_TIMER: usize = 3;
+/// Re-run the deep search while indexed roots are still being crawled.
+const SEARCH_REFRESH_TIMER: usize = 4;
 
 impl WindowState {
     pub fn active_tab(&self) -> &TabPresenter {
@@ -146,6 +155,7 @@ impl WindowState {
     }
 
     pub fn trigger_navigate(&mut self, target: PathBuf) {
+        self.exit_search(true);
         let session_id = self.session_id.clone();
         let include_hidden = self.active_tab().show_hidden;
         let (tab_id, epoch) = {
@@ -169,6 +179,7 @@ impl WindowState {
     }
 
     pub fn trigger_navigate_history(&mut self, target: PathBuf) {
+        self.exit_search(true);
         let session_id = self.session_id.clone();
         let include_hidden = self.active_tab().show_hidden;
         let (tab_id, epoch) = {
@@ -191,6 +202,10 @@ impl WindowState {
     }
 
     pub fn trigger_refresh(&mut self) {
+        if self.search.active {
+            self.run_search();
+            return;
+        }
         let session_id = self.session_id.clone();
         let (tab_id, epoch, path, include_hidden) = {
             let tab = self.active_tab_mut();
@@ -217,18 +232,81 @@ impl WindowState {
         });
     }
 
-    pub fn trigger_search(&mut self, query: String) {
-        let session_id = self.session_id.clone();
-        let tab = self.active_tab_mut();
-        tab.view_epoch += 1;
-        let req_id = RequestIdentity::new(session_id, tab.tab_id.clone(), 0, tab.view_epoch);
+    pub fn on_search_changed(&mut self, raw: &str) {
+        let query = raw.trim().to_string();
+        unsafe {
+            let _ = KillTimer(self.hwnd_main, SEARCH_DEBOUNCE_TIMER);
+        }
+        if query.is_empty() {
+            self.exit_search(false);
+            return;
+        }
+
+        if !self.search.active {
+            self.search.active = true;
+            self.search.auto_indexed_path = None;
+            self.search.auto_index_pending = false;
+            self.search.auto_index_attempts = 0;
+            self.active_tab_mut().selected_indices.clear();
+            self.clear_list_selection();
+            if let Some(pane) = self.preview_pane.as_mut() {
+                pane.clear();
+            }
+            self.apply_search_columns();
+        }
+
+        self.search.begin(query);
+        self.apply_list_colors();
+        self.set_list_count(0);
+        self.update_status_bar();
+
+        unsafe {
+            let _ = SetTimer(
+                self.hwnd_main,
+                SEARCH_DEBOUNCE_TIMER,
+                search::DEBOUNCE_MS,
+                None,
+            );
+        }
+    }
+
+    pub fn run_search(&mut self) {
+        unsafe {
+            let _ = KillTimer(self.hwnd_main, SEARCH_DEBOUNCE_TIMER);
+        }
+        let query = self.search.query.trim().to_string();
+        if query.is_empty() {
+            self.exit_search(true);
+            return;
+        }
+
+        self.search.active = true;
+        self.search.query = query.clone();
+        self.search.generation = self.search.generation.wrapping_add(1);
+        self.search.pending = true;
+        self.search.error = None;
+        self.ensure_index_roots();
+
+        let generation = self.search.generation;
+        let identity = RequestIdentity::new(
+            self.session_id.clone(),
+            self.active_tab().tab_id.clone(),
+            0,
+            generation,
+        );
         let app_state = self.app_state.clone();
         let dispatcher = self.dispatcher.clone();
 
         self.runtime_handle.spawn(async move {
-            let q = query.clone();
+            let q = query;
             let res = tokio::task::spawn_blocking(move || {
-                explorer_app::operations::search_indexed(&app_state, &q, None, 100, 0)
+                explorer_app::operations::search_indexed(
+                    &app_state,
+                    &q,
+                    None,
+                    1,
+                    search::RESULT_LIMIT,
+                )
             })
             .await
             .unwrap_or_else(|_| {
@@ -239,13 +317,225 @@ impl WindowState {
                 ))
             });
             dispatcher.enqueue(UiEvent::SearchReady(CompletionEnvelope {
-                identity: req_id,
+                identity,
                 result: res,
             }));
         });
+
+        self.update_status_bar();
+    }
+
+    fn ensure_index_roots(&mut self) {
+        let roots = match explorer_app::operations::list_indexed_roots(&self.app_state) {
+            Ok(roots) => roots,
+            Err(error) => {
+                self.search.error = Some(error.user_message.clone());
+                return;
+            }
+        };
+
+        self.search.indexing = roots
+            .iter()
+            .any(|root| matches!(root.state, RootState::Scanning | RootState::NotIndexed));
+        if !roots.is_empty() {
+            self.search.auto_index_pending = false;
+            return;
+        }
+
+        let path = self.active_tab().current_path.clone();
+        if self.search.auto_indexed_path.as_ref() == Some(&path) {
+            return;
+        }
+        self.search.auto_indexed_path = Some(path.clone());
+        self.search.auto_index_pending = true;
+        self.search.auto_index_attempts = 0;
+
+        let Some(token) = self.active_tab().folder_token.clone() else {
+            self.search.auto_index_pending = false;
+            self.flash_status("Folder is not ready for indexing yet");
+            return;
+        };
+
+        let app_state = self.app_state.clone();
+        let dispatcher = self.dispatcher.clone();
+        self.runtime_handle.spawn(async move {
+            if let Err(error) = explorer_app::operations::add_indexed_root(&app_state, &token).await
+            {
+                dispatcher.enqueue(UiEvent::SearchIndexFailed(error));
+            }
+        });
+
+        self.flash_status(format!("Indexing {} for deep search", path.display()));
+        unsafe {
+            let _ = SetTimer(
+                self.hwnd_main,
+                SEARCH_REFRESH_TIMER,
+                search::REFRESH_MS,
+                None,
+            );
+        }
+    }
+
+    fn schedule_search_refresh(&mut self) {
+        let roots =
+            explorer_app::operations::list_indexed_roots(&self.app_state).unwrap_or_default();
+        let indexing = roots
+            .iter()
+            .any(|root| matches!(root.state, RootState::Scanning | RootState::NotIndexed));
+        if !roots.is_empty() {
+            self.search.auto_index_pending = false;
+        } else if self.search.auto_index_pending {
+            self.search.auto_index_attempts = self.search.auto_index_attempts.saturating_add(1);
+            if self.search.auto_index_attempts >= 3 {
+                self.search.auto_index_pending = false;
+            }
+        }
+        self.search.indexing = indexing;
+
+        let should_refresh = (indexing || self.search.auto_index_pending)
+            && self.search.active
+            && !self.search.query.is_empty();
+        unsafe {
+            if should_refresh {
+                let _ = SetTimer(
+                    self.hwnd_main,
+                    SEARCH_REFRESH_TIMER,
+                    search::REFRESH_MS,
+                    None,
+                );
+            } else {
+                let _ = KillTimer(self.hwnd_main, SEARCH_REFRESH_TIMER);
+            }
+        }
+    }
+
+    pub fn exit_search(&mut self, clear_query: bool) {
+        unsafe {
+            let _ = KillTimer(self.hwnd_main, SEARCH_DEBOUNCE_TIMER);
+            let _ = KillTimer(self.hwnd_main, SEARCH_REFRESH_TIMER);
+        }
+
+        let was_active = self.search.active;
+        self.search.clear();
+        if clear_query {
+            unsafe {
+                let _ = SetWindowTextW(self.hwnd_search, w!(""));
+            }
+        }
+        if !was_active {
+            self.update_status_bar();
+            return;
+        }
+
+        self.active_tab_mut().set_filter("");
+        self.active_tab_mut().selected_indices.clear();
+        if let Some(pane) = self.preview_pane.as_mut() {
+            pane.clear();
+        }
+        self.apply_browse_columns();
+        self.clear_list_selection();
+        self.set_list_count(self.active_tab().visible_item_count());
+        self.apply_list_colors();
+        self.update_sort_indicator();
+        self.update_status_bar();
+    }
+
+    fn set_list_count(&self, count: usize) {
+        unsafe {
+            let _ = SendMessageW(self.hwnd_list, LVM_SETITEMCOUNT, WPARAM(count), LPARAM(1));
+            let _ = InvalidateRect(self.hwnd_list, None, true);
+        }
+    }
+
+    fn clear_list_selection(&self) {
+        unsafe {
+            let mut item = LVITEMW {
+                state: LIST_VIEW_ITEM_STATE_FLAGS(0),
+                stateMask: LVIS_SELECTED,
+                ..Default::default()
+            };
+            let _ = SendMessageW(
+                self.hwnd_list,
+                LVM_SETITEMSTATE,
+                WPARAM(usize::MAX),
+                LPARAM(&mut item as *mut _ as isize),
+            );
+        }
+    }
+
+    fn set_column_label(&self, index: usize, label: &str) {
+        let mut text: Vec<u16> = label.encode_utf16().chain(Some(0)).collect();
+        let mut column = LVCOLUMNW {
+            mask: LVCF_TEXT,
+            pszText: PWSTR(text.as_mut_ptr()),
+            ..Default::default()
+        };
+        unsafe {
+            let _ = SendMessageW(
+                self.hwnd_list,
+                LVM_SETCOLUMNW,
+                WPARAM(index),
+                LPARAM(&mut column as *mut _ as isize),
+            );
+        }
+    }
+
+    fn apply_search_columns(&self) {
+        self.set_column_label(0, "Name");
+        self.set_column_label(1, "Location");
+        self.set_column_label(2, "Size");
+        self.set_column_label(3, "Date modified");
+        self.layout_children();
+        self.update_sort_indicator();
+    }
+
+    fn apply_list_colors(&self) {
+        let (background, text) = if self.theme.dark && !self.theme.high_contrast {
+            (DARK_PANEL, theme::DARK_TEXT)
+        } else {
+            unsafe { (GetSysColor(COLOR_WINDOW), GetSysColor(COLOR_WINDOWTEXT)) }
+        };
+        unsafe {
+            let _ = SendMessageW(
+                self.hwnd_list,
+                LVM_SETBKCOLOR,
+                WPARAM(0),
+                LPARAM(background as isize),
+            );
+            let _ = SendMessageW(
+                self.hwnd_list,
+                LVM_SETTEXTCOLOR,
+                WPARAM(0),
+                LPARAM(text as isize),
+            );
+            let _ = SendMessageW(
+                self.hwnd_list,
+                LVM_SETTEXTBKCOLOR,
+                WPARAM(0),
+                LPARAM(CLR_NONE as isize),
+            );
+            let _ = InvalidateRect(self.hwnd_list, None, true);
+        }
+    }
+
+    fn apply_browse_columns(&self) {
+        self.set_column_label(0, "Name");
+        self.set_column_label(1, "Type");
+        self.set_column_label(2, "Size");
+        self.set_column_label(3, "Date modified");
+        self.layout_children();
+    }
+
+    fn search_selected_count(&self) -> usize {
+        unsafe {
+            SendMessageW(self.hwnd_list, LVM_GETSELECTEDCOUNT, WPARAM(0), LPARAM(0)).0 as usize
+        }
     }
 
     pub fn trigger_preview_load(&mut self, item_idx: usize) {
+        if self.search.active {
+            return;
+        }
         let Some(entry) = self.active_tab().get_visible_entry(item_idx) else {
             return;
         };
@@ -273,6 +563,7 @@ impl WindowState {
     }
 
     pub fn create_new_tab(&mut self, path: PathBuf) {
+        self.exit_search(true);
         let tab_id = format!("tab-{}", self.next_tab_id);
         self.next_tab_id += 1;
         let new_tab = TabPresenter::new(tab_id, path.clone());
@@ -306,6 +597,7 @@ impl WindowState {
         if self.tabs.len() <= 1 {
             return;
         }
+        self.exit_search(true);
         let cur_idx = self.active_tab_idx;
         let closed_tab_id = self.tabs[cur_idx].tab_id.clone();
         let _ = explorer_app::operations::unwatch_all(&self.app_state, &closed_tab_id);
@@ -337,6 +629,7 @@ impl WindowState {
 
     pub fn switch_tab(&mut self, new_idx: usize) {
         if new_idx < self.tabs.len() && new_idx != self.active_tab_idx {
+            self.exit_search(true);
             self.active_tab_idx = new_idx;
             unsafe {
                 let _ = SendMessageW(self.hwnd_tabs, TCM_SETCURSEL, WPARAM(new_idx), LPARAM(0));
@@ -381,6 +674,25 @@ impl WindowState {
     }
 
     pub fn action_select_all(&mut self) {
+        if self.search.active {
+            unsafe {
+                let mut item = LVITEMW {
+                    state: LVIS_SELECTED,
+                    stateMask: LVIS_SELECTED,
+                    ..Default::default()
+                };
+                let _ = SendMessageW(
+                    self.hwnd_list,
+                    LVM_SETITEMSTATE,
+                    WPARAM(usize::MAX),
+                    LPARAM(&mut item as *mut _ as isize),
+                );
+                let _ = InvalidateRect(self.hwnd_list, None, true);
+            }
+            self.update_status_bar();
+            return;
+        }
+
         let count = self.active_tab().visible_item_count();
         let tab = self.active_tab_mut();
         for i in 0..count {
@@ -403,7 +715,19 @@ impl WindowState {
         self.update_status_bar();
     }
 
+    fn reject_search_action(&mut self) -> bool {
+        if self.search.active {
+            self.flash_status("Not available in search results");
+            true
+        } else {
+            false
+        }
+    }
+
     pub fn action_new_folder(&mut self) {
+        if self.reject_search_action() {
+            return;
+        }
         let Some(ft) = self.active_tab().folder_token.clone() else {
             return;
         };
@@ -448,6 +772,9 @@ impl WindowState {
     }
 
     pub fn action_rename(&mut self) {
+        if self.reject_search_action() {
+            return;
+        }
         let selected_idx = self.active_tab().selected_indices.iter().copied().next();
         let Some(idx) = selected_idx else { return };
         let Some(entry) = self.active_tab().get_visible_entry(idx) else {
@@ -499,6 +826,9 @@ impl WindowState {
     }
 
     pub fn action_recycle(&mut self) {
+        if self.reject_search_action() {
+            return;
+        }
         let indices: Vec<usize> = self.active_tab().selected_indices.iter().copied().collect();
         if indices.is_empty() {
             return;
@@ -551,6 +881,9 @@ impl WindowState {
     }
 
     pub fn action_copy(&mut self, is_cut: bool) {
+        if self.reject_search_action() {
+            return;
+        }
         let indices: Vec<usize> = self.active_tab().selected_indices.iter().copied().collect();
         if indices.is_empty() {
             return;
@@ -586,6 +919,9 @@ impl WindowState {
     }
 
     pub fn action_paste(&mut self) {
+        if self.reject_search_action() {
+            return;
+        }
         let Some(ft) = self.active_tab().folder_token.clone() else {
             return;
         };
@@ -620,6 +956,10 @@ impl WindowState {
 
     /// Opens the focused/selected row: folders navigate in-tab, files launch.
     pub fn open_selected_item(&mut self) {
+        if self.search.active {
+            self.open_selected_search_result();
+            return;
+        }
         let selected = unsafe {
             SendMessageW(
                 self.hwnd_list,
@@ -670,6 +1010,115 @@ impl WindowState {
         });
     }
 
+    fn selected_search_row(&self) -> Option<usize> {
+        let selected = unsafe {
+            SendMessageW(
+                self.hwnd_list,
+                LVM_GETNEXTITEM,
+                WPARAM(usize::MAX),
+                LPARAM(LVNI_SELECTED as isize),
+            )
+            .0
+        };
+        if selected < 0 {
+            None
+        } else {
+            Some(selected as usize)
+        }
+    }
+
+    fn selected_search_item(&self) -> Option<explorer_index::SearchResultItem> {
+        let row = self.selected_search_row()?;
+        self.search.results.get(row).cloned()
+    }
+
+    fn open_selected_search_result(&mut self) {
+        let Some(item) = self.selected_search_item() else {
+            return;
+        };
+        if item.kind != "file" {
+            match explorer_app::operations::path_from_utf16(&item.path_utf16, "search_open") {
+                Ok(path) => self.trigger_navigate(path),
+                Err(error) => self.flash_status(error.user_message.clone()),
+            }
+            return;
+        }
+
+        let app_state = self.app_state.clone();
+        let dispatcher = self.dispatcher.clone();
+        let path_utf16 = item.path_utf16;
+        self.runtime_handle.spawn(async move {
+            if let Err(error) =
+                explorer_app::operations::open_path_with(&app_state, &path_utf16, true).await
+            {
+                dispatcher.enqueue(UiEvent::OperationError(error));
+            }
+        });
+    }
+
+    fn open_selected_search_containing_folder(&mut self) {
+        let Some(item) = self.selected_search_item() else {
+            return;
+        };
+        match explorer_app::operations::path_from_utf16(&item.path_utf16, "search_containing") {
+            Ok(path) => match path.parent() {
+                Some(parent) => self.trigger_navigate(parent.to_path_buf()),
+                None => self.flash_status("This item has no containing folder"),
+            },
+            Err(error) => self.flash_status(error.user_message.clone()),
+        }
+    }
+
+    fn copy_selected_search_path(&mut self) {
+        let Some(item) = self.selected_search_item() else {
+            return;
+        };
+        let path = match explorer_app::operations::path_from_utf16(&item.path_utf16, "search_copy")
+        {
+            Ok(path) => explorer_win::path::strip_extended_prefix(&path),
+            Err(error) => {
+                self.flash_status(error.user_message.clone());
+                return;
+            }
+        };
+        let path_utf16 = explorer_win::path::path_to_wide(&path);
+        let owner = self.hwnd_main.0 as usize;
+        let dispatcher = self.dispatcher.clone();
+        self.runtime_handle.spawn(async move {
+            match explorer_app::operations::clipboard_write_path(&path_utf16, owner).await {
+                Ok(()) => dispatcher.enqueue(UiEvent::StatusMessage("Path copied".to_string())),
+                Err(error) => dispatcher.enqueue(UiEvent::OperationError(error)),
+            }
+        });
+    }
+
+    pub fn search_icon_index(&mut self, row: usize) -> i32 {
+        let Some(item) = self.search.results.get(row) else {
+            return 0;
+        };
+        let (key, icon_key, is_dir) = match item.kind.as_str() {
+            "directory" => ("search:dir".to_string(), "", true),
+            "reparse_point" => ("search:link".to_string(), "link", false),
+            _ => {
+                if item.extension.is_empty() {
+                    ("search:file".to_string(), "file", false)
+                } else {
+                    (
+                        format!("search:{}", item.extension.to_ascii_lowercase()),
+                        item.extension.as_str(),
+                        false,
+                    )
+                }
+            }
+        };
+        if let Some(index) = self.icon_cache.get(&key) {
+            return *index;
+        }
+        let index = crate::icons::icon_index(icon_key, is_dir);
+        self.icon_cache.insert(key, index);
+        index
+    }
+
     /// Re-sorts the current snapshot without re-enumerating the directory.
     pub fn resort(&mut self) {
         let tab = self.active_tab_mut();
@@ -689,6 +1138,42 @@ impl WindowState {
 
     /// Draws the ascending/descending arrow on the active sort column.
     pub fn update_sort_indicator(&self) {
+        if self.search.active {
+            unsafe {
+                let header = SendMessageW(self.hwnd_list, LVM_GETHEADER, WPARAM(0), LPARAM(0));
+                if header.0 == 0 {
+                    return;
+                }
+                let header = HWND(header.0 as *mut _);
+                for current in 0..4 {
+                    let mut item = HDITEMW {
+                        mask: HDI_FORMAT,
+                        ..Default::default()
+                    };
+                    if SendMessageW(
+                        header,
+                        HDM_GETITEMW,
+                        WPARAM(current),
+                        LPARAM(&mut item as *mut _ as isize),
+                    )
+                    .0 == 0
+                    {
+                        continue;
+                    }
+                    item.mask = HDI_FORMAT;
+                    item.fmt =
+                        HEADER_CONTROL_FORMAT_FLAGS(item.fmt.0 & !(HDF_SORTUP.0 | HDF_SORTDOWN.0));
+                    let _ = SendMessageW(
+                        header,
+                        HDM_SETITEMW,
+                        WPARAM(current),
+                        LPARAM(&mut item as *mut _ as isize),
+                    );
+                }
+            }
+            return;
+        }
+
         let column = self.active_tab().sort_column;
         let ascending = self.active_tab().sort_direction == SortDirection::Ascending;
         let index = match column {
@@ -799,6 +1284,9 @@ impl WindowState {
     }
 
     pub fn action_properties(&mut self) {
+        if self.reject_search_action() {
+            return;
+        }
         let selected_idx = self.active_tab().selected_indices.iter().copied().next();
         let item_token = selected_idx
             .and_then(|idx| self.active_tab().get_visible_entry(idx))
@@ -821,6 +1309,9 @@ impl WindowState {
     }
 
     pub fn action_open_in_explorer(&mut self) {
+        if self.reject_search_action() {
+            return;
+        }
         let selected_idx = self.active_tab().selected_indices.iter().copied().next();
         let item_token = selected_idx
             .and_then(|idx| self.active_tab().get_visible_entry(idx))
@@ -851,6 +1342,9 @@ impl WindowState {
     }
 
     pub fn action_toggle_hidden(&mut self) {
+        if self.reject_search_action() {
+            return;
+        }
         let next = !self.active_tab().show_hidden;
         self.active_tab_mut().show_hidden = next;
         self.active_tab_mut().set_filter("");
@@ -858,87 +1352,151 @@ impl WindowState {
         self.trigger_refresh();
     }
 
-    pub fn action_toggle_dark_mode(&mut self) {
-        self.is_dark_mode = !self.is_dark_mode;
+    pub fn action_cycle_theme(&mut self) {
+        self.theme.preference = self.theme.preference.cycle();
+        self.theme.refresh();
         self.apply_theme();
+        if self.persist_theme_preference() {
+            self.flash_status(format!("Theme: {}", self.theme.preference.label()));
+        }
     }
 
-    /// Applies or removes the dark palette across the shell chrome.
-    pub fn apply_theme(&mut self) {
-        const TEXT: u32 = 0x00F0F0F0;
-        const BACKGROUND: u32 = 0x00202020;
-        const PANEL: u32 = 0x002C2C2C;
-        const CLR_NONE: u32 = 0xFFFF_FFFF;
-        let dark = self.is_dark_mode;
+    pub fn update_theme_button(&self) {
+        let label = format!("Theme: {}", self.theme.preference.label());
+        let mut utf16: Vec<u16> = label.encode_utf16().chain(Some(0)).collect();
+        unsafe {
+            let _ = SetWindowTextW(self.hwnd_btn_theme, PCWSTR(utf16.as_mut_ptr()));
+        }
+    }
 
-        if dark {
-            if self.dark_background.is_none() {
-                let brush = unsafe { CreateSolidBrush(COLORREF(BACKGROUND)) };
-                self.dark_background = Some(SafeBrush::new(brush));
+    fn persist_theme_preference(&mut self) -> bool {
+        match explorer_app::operations::load_settings(&self.app_state) {
+            Ok(mut settings) => {
+                settings.theme = self.theme.preference.as_setting().to_string();
+                if let Err(error) =
+                    explorer_app::operations::save_settings(&self.app_state, &settings)
+                {
+                    self.flash_status(format!("Theme not saved: {}", error));
+                    false
+                } else {
+                    true
+                }
             }
-            if self.dark_control.is_none() {
-                let brush = unsafe { CreateSolidBrush(COLORREF(PANEL)) };
-                self.dark_control = Some(SafeBrush::new(brush));
+            Err(error) => {
+                self.flash_status(format!("Theme not saved: {}", error));
+                false
             }
+        }
+    }
+
+    /// Applies the resolved light/dark palette across every shell surface.
+    pub fn apply_theme(&mut self) {
+        if self.theme_applying {
+            return;
+        }
+        self.theme_applying = true;
+        let dark = self.theme.dark;
+        let high_contrast = self.theme.high_contrast;
+
+        theme::set_active(dark, high_contrast);
+        if !high_contrast {
+            theme::set_preferred_app_mode(self.theme.app_mode());
+            theme::flush_menu_themes();
+            theme::apply_window_chrome(self.hwnd_main, dark);
+            theme::allow_dark_mode_for_window(self.hwnd_main, dark);
+            self.apply_control_themes(dark);
         } else {
-            self.dark_background = None;
-            self.dark_control = None;
+            theme::apply_window_chrome(self.hwnd_main, false);
+            theme::allow_dark_mode_for_window(self.hwnd_main, false);
+            self.apply_control_themes(false);
         }
 
         unsafe {
-            // Immersive dark title bar (Windows 10 1809+ / Windows 11).
-            let enabled = BOOL::from(dark);
-            let _ = DwmSetWindowAttribute(
-                self.hwnd_main,
-                DWMWA_USE_IMMERSIVE_DARK_MODE,
-                &enabled as *const _ as *const core::ffi::c_void,
-                std::mem::size_of::<BOOL>() as u32,
-            );
-
-            // Native dark control rendering (edit/listview/treeview scrollbars and
-            // text) via the undocumented-but-stable dark theme class.
-            let theme = if dark {
-                w!("DarkMode_Explorer")
-            } else {
-                w!("Explorer")
-            };
-            for control in [
-                self.hwnd_address,
-                self.hwnd_search,
-                self.hwnd_list,
-                self.hwnd_sidebar,
-                self.hwnd_tabs,
-                self.hwnd_status,
-            ] {
-                if !control.is_invalid() {
-                    let _ = SetWindowTheme(control, theme, PCWSTR::null());
-                }
-            }
-            if let Some(pane) = self.preview_pane.as_ref() {
-                let _ = SetWindowTheme(pane.hwnd_container, theme, PCWSTR::null());
-                let _ = SetWindowTheme(pane.hwnd_text, theme, PCWSTR::null());
-            }
-            let header = SendMessageW(self.hwnd_list, LVM_GETHEADER, WPARAM(0), LPARAM(0));
-            if header.0 != 0 {
-                let header_theme = if dark {
-                    w!("DarkMode_ItemsView")
+            let (gridline_style, status_color, tree_background, tree_text) =
+                if dark && !high_contrast {
+                    (
+                        0,
+                        DARK_PANEL as isize,
+                        DARK_PANEL as isize,
+                        theme::DARK_TEXT as isize,
+                    )
                 } else {
-                    w!("ItemsView")
+                    (
+                        LVS_EX_GRIDLINES as isize,
+                        CLR_DEFAULT as isize,
+                        GetSysColor(COLOR_WINDOW) as isize,
+                        GetSysColor(COLOR_WINDOWTEXT) as isize,
+                    )
                 };
-                let _ = SetWindowTheme(HWND(header.0 as *mut _), header_theme, PCWSTR::null());
-                let _ = InvalidateRect(HWND(header.0 as *mut _), None, true);
-            }
+            let _ = SendMessageW(
+                self.hwnd_list,
+                LVM_SETEXTENDEDLISTVIEWSTYLE,
+                WPARAM(LVS_EX_GRIDLINES as usize),
+                LPARAM(gridline_style),
+            );
+            let _ = SendMessageW(
+                self.hwnd_status,
+                SB_SETBKCOLOR,
+                WPARAM(0),
+                LPARAM(status_color),
+            );
+            let _ = SendMessageW(
+                self.hwnd_sidebar,
+                TVM_SETBKCOLOR,
+                WPARAM(0),
+                LPARAM(tree_background),
+            );
+            let _ = SendMessageW(
+                self.hwnd_sidebar,
+                TVM_SETTEXTCOLOR,
+                WPARAM(0),
+                LPARAM(tree_text),
+            );
+            let _ = RedrawWindow(
+                self.hwnd_main,
+                None,
+                None,
+                RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_FRAME,
+            );
+        }
 
-            // Let the dark control theme paint list/tree/status surfaces; forcing
-            // LVM/TVM colors on top of a themed control produces dark-on-dark text.
-            let _ = InvalidateRect(self.hwnd_main, None, true);
-            let _ = InvalidateRect(self.hwnd_list, None, true);
-            let _ = InvalidateRect(self.hwnd_sidebar, None, true);
-            let _ = InvalidateRect(self.hwnd_status, None, true);
+        self.update_status_bar();
+        self.update_theme_button();
+        self.apply_list_colors();
+        self.theme_applying = false;
+    }
+
+    fn apply_control_themes(&self, dark: bool) {
+        for (control, kind) in [
+            (self.hwnd_btn_back, ThemeControl::Button),
+            (self.hwnd_btn_forward, ThemeControl::Button),
+            (self.hwnd_btn_up, ThemeControl::Button),
+            (self.hwnd_btn_refresh, ThemeControl::Button),
+            (self.hwnd_address, ThemeControl::Edit),
+            (self.hwnd_search, ThemeControl::Edit),
+            (self.hwnd_btn_theme, ThemeControl::Button),
+            (self.hwnd_btn_preview, ThemeControl::Button),
+            (self.hwnd_tabs, ThemeControl::Tab),
+            (self.hwnd_sidebar, ThemeControl::Tree),
+            (self.hwnd_list, ThemeControl::List),
+            (self.hwnd_status, ThemeControl::Status),
+        ] {
+            theme::apply_control_theme(control, dark, kind);
+        }
+
+        let header = unsafe { SendMessageW(self.hwnd_list, LVM_GETHEADER, WPARAM(0), LPARAM(0)) };
+        if header.0 != 0 {
+            theme::apply_control_theme(HWND(header.0 as *mut _), dark, ThemeControl::Header);
+        }
+        if let Some(pane) = self.preview_pane.as_ref() {
+            pane.apply_theme(dark);
         }
     }
 
     pub fn action_add_favorite(&mut self) {
+        if self.reject_search_action() {
+            return;
+        }
         let path_str = self.active_tab().current_path.to_string_lossy().to_string();
         let _ = explorer_app::operations::add_favorite(&self.app_state, &path_str);
         self.refresh_sidebar();
@@ -950,6 +1508,9 @@ impl WindowState {
     }
 
     pub fn action_remove_favorite(&mut self) {
+        if self.reject_search_action() {
+            return;
+        }
         let path_str = self.active_tab().current_path.to_string_lossy().to_string();
         let _ = explorer_app::operations::remove_favorite(&self.app_state, &path_str);
         self.refresh_sidebar();
@@ -977,52 +1538,69 @@ impl WindowState {
         }
     }
 
-    pub fn update_status_bar(&self) {
-        let total = self.active_tab().total_items;
-        let visible = self.active_tab().visible_item_count();
-        let sel_count = self.active_tab().selected_indices.len();
-
-        let part1 = explorer_win::path::to_display_string(&self.active_tab().current_path);
-        let part2 = if visible != total {
-            format!("{} items (filtered from {})", visible, total)
+    pub fn update_status_bar(&mut self) {
+        let (part1, part2, part3) = if self.search.active {
+            let (part1, part2) = self.search.status_parts();
+            let selected = self.search_selected_count();
+            let part3 = if let Some(message) = self.status_message.clone() {
+                message
+            } else if selected > 0 {
+                format!(
+                    "{} item{} selected",
+                    selected,
+                    if selected == 1 { "" } else { "s" }
+                )
+            } else {
+                String::new()
+            };
+            (part1, part2, part3)
         } else {
-            format!("{} items", total)
-        };
-        let part3 = if let Some(message) = self.status_message.clone() {
-            message
-        } else if sel_count > 0 {
-            format!(
-                "{} item{} selected",
-                sel_count,
-                if sel_count == 1 { "" } else { "s" }
-            )
-        } else {
-            String::new()
+            let total = self.active_tab().total_items;
+            let visible = self.active_tab().visible_item_count();
+            let sel_count = self.active_tab().selected_indices.len();
+
+            let part1 = explorer_win::path::to_display_string(&self.active_tab().current_path);
+            let part2 = if visible != total {
+                format!("{} items (filtered from {})", visible, total)
+            } else {
+                format!("{} items", total)
+            };
+            let part3 = if let Some(message) = self.status_message.clone() {
+                message
+            } else if sel_count > 0 {
+                format!(
+                    "{} item{} selected",
+                    sel_count,
+                    if sel_count == 1 { "" } else { "s" }
+                )
+            } else {
+                String::new()
+            };
+            (part1, part2, part3)
         };
 
-        let p1_utf16: Vec<u16> = part1.encode_utf16().chain(Some(0)).collect();
-        let p2_utf16: Vec<u16> = part2.encode_utf16().chain(Some(0)).collect();
-        let p3_utf16: Vec<u16> = part3.encode_utf16().chain(Some(0)).collect();
+        self.status_parts = [part1, part2, part3];
+        let dark = self.theme.dark;
 
         unsafe {
-            let _ = SendMessageW(
-                self.hwnd_status,
-                SB_SETTEXTW,
-                WPARAM(0),
-                LPARAM(p1_utf16.as_ptr() as isize),
-            );
-            let _ = SendMessageW(
-                self.hwnd_status,
-                SB_SETTEXTW,
-                WPARAM(1),
-                LPARAM(p2_utf16.as_ptr() as isize),
-            );
-            let _ = SendMessageW(
-                self.hwnd_status,
-                SB_SETTEXTW,
-                WPARAM(2),
-                LPARAM(p3_utf16.as_ptr() as isize),
-            );
+            for (index, text) in self.status_parts.iter().enumerate() {
+                if dark {
+                    let _ = SendMessageW(
+                        self.hwnd_status,
+                        SB_SETTEXTW,
+                        WPARAM(index | SBT_OWNERDRAW as usize),
+                        LPARAM(index as isize),
+                    );
+                } else {
+                    let utf16: Vec<u16> = text.encode_utf16().chain(Some(0)).collect();
+                    let _ = SendMessageW(
+                        self.hwnd_status,
+                        SB_SETTEXTW,
+                        WPARAM(index),
+                        LPARAM(utf16.as_ptr() as isize),
+                    );
+                }
+            }
         }
     }
 
@@ -1191,7 +1769,7 @@ impl WindowState {
 
         // 2. Right-aligned tools, then the address fills the remaining space.
         let preview_btn_w = scale(82);
-        let theme_btn_w = scale(70);
+        let theme_btn_w = scale(120);
         let search_w = scale(220);
         let right = width - pad;
         let preview_x = right - preview_btn_w;
@@ -1238,6 +1816,14 @@ impl WindowState {
         let tabs_y = pad + btn_size + gap;
         unsafe {
             let _ = MoveWindow(self.hwnd_tabs, 0, tabs_y, width, tabs_h, true);
+            let item_width = scale(180);
+            let item_size = ((tabs_h as u32) << 16) | (item_width as u32 & 0xffff);
+            let _ = SendMessageW(
+                self.hwnd_tabs,
+                TCM_SETITEMSIZE,
+                WPARAM(0),
+                LPARAM(item_size as isize),
+            );
         }
 
         // 4. Sidebar / list / preview
@@ -1261,14 +1847,23 @@ impl WindowState {
             pane.set_bounds(list_x + list_w, content_y, preview_w, content_h);
         }
 
-        // Stretch the Name column so the report fills the view, leaving room for the
-        // vertical scrollbar the control reserves.
-        let type_w = scale(96);
+        // Stretch the flexible column so the report fills the view, leaving room for
+        // the vertical scrollbar the control reserves.
         let size_w = scale(96);
         let date_w = scale(160);
         let scrollbar_w = unsafe { GetSystemMetrics(SM_CXVSCROLL) };
-        let name_w = (list_w - type_w - size_w - date_w - scale(4) - scrollbar_w).max(scale(180));
-        for (column, column_width) in [name_w, type_w, size_w, date_w].into_iter().enumerate() {
+        let (name_w, middle_w) = if self.search.active {
+            let name_w = scale(240);
+            let middle_w =
+                (list_w - name_w - size_w - date_w - scale(4) - scrollbar_w).max(scale(180));
+            (name_w, middle_w)
+        } else {
+            let type_w = scale(96);
+            let name_w =
+                (list_w - type_w - size_w - date_w - scale(4) - scrollbar_w).max(scale(180));
+            (name_w, type_w)
+        };
+        for (column, column_width) in [name_w, middle_w, size_w, date_w].into_iter().enumerate() {
             unsafe {
                 let _ = SendMessageW(
                     self.hwnd_list,
@@ -1343,28 +1938,188 @@ unsafe extern "system" fn search_edit_subclass_proc(
 ) -> LRESULT {
     if msg == WM_KEYDOWN {
         if wparam.0 == 0x0D {
-            // Enter: trigger indexed search
+            // Enter: run the deep indexed search immediately.
             let state_ptr = refdata as *mut WindowState;
             if let Some(state) = state_ptr.as_mut() {
                 let len = GetWindowTextLengthW(hwnd) as usize;
                 let mut buf = vec![0u16; len + 1];
                 let copied = GetWindowTextW(hwnd, &mut buf) as usize;
                 let query = String::from_utf16_lossy(&buf[..copied]);
-                state.trigger_search(query.trim().to_string());
+                state.on_search_changed(query.trim());
+                if state.search.active {
+                    state.run_search();
+                }
                 return LRESULT(0);
             }
         } else if wparam.0 == 0x1B {
-            // Escape: clear filter
+            // Escape: leave search and restore the browsed folder.
             let state_ptr = refdata as *mut WindowState;
             if let Some(state) = state_ptr.as_mut() {
-                let _ = SetWindowTextW(hwnd, w!(""));
-                state.active_tab_mut().set_filter("");
-                let count = state.active_tab().visible_item_count();
-                let _ = SendMessageW(state.hwnd_list, LVM_SETITEMCOUNT, WPARAM(count), LPARAM(1));
-                let _ = InvalidateRect(state.hwnd_list, None, true);
-                state.update_status_bar();
+                state.exit_search(true);
                 return LRESULT(0);
             }
+        }
+    }
+    DefSubclassProc(hwnd, msg, wparam, lparam)
+}
+
+unsafe extern "system" fn preview_container_subclass_proc(
+    hwnd: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+    _uidsubclass: usize,
+    refdata: usize,
+) -> LRESULT {
+    let state_ptr = refdata as *mut WindowState;
+    if let Some(state) = state_ptr.as_ref()
+        && state.theme.dark
+    {
+        let hdc = HDC(wparam.0 as *mut _);
+        match msg {
+            WM_ERASEBKGND => {
+                let mut rect = RECT::default();
+                let _ = GetClientRect(hwnd, &mut rect);
+                let _ = FillRect(hdc, &rect, state.theme.panel_brush());
+                return LRESULT(1);
+            }
+            WM_CTLCOLORSTATIC | WM_CTLCOLOREDIT => {
+                let control = HWND(lparam.0 as *mut _);
+                let is_text = state
+                    .preview_pane
+                    .as_ref()
+                    .is_some_and(|pane| pane.hwnd_text == control);
+                let (text, background, brush) = if is_text {
+                    (
+                        theme::DARK_TEXT,
+                        theme::DARK_INPUT,
+                        state.theme.input_brush(),
+                    )
+                } else {
+                    (
+                        theme::DARK_TEXT,
+                        theme::DARK_PANEL,
+                        state.theme.panel_brush(),
+                    )
+                };
+                let _ = SetTextColor(hdc, COLORREF(text));
+                let _ = SetBkColor(hdc, COLORREF(background));
+                let _ = SetBkMode(hdc, TRANSPARENT);
+                return LRESULT(brush.0 as isize);
+            }
+            _ => {}
+        }
+    }
+    DefSubclassProc(hwnd, msg, wparam, lparam)
+}
+
+unsafe extern "system" fn status_bar_subclass_proc(
+    hwnd: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+    _uidsubclass: usize,
+    refdata: usize,
+) -> LRESULT {
+    let state_ptr = refdata as *mut WindowState;
+    if msg == WM_ERASEBKGND
+        && let Some(state) = state_ptr.as_ref()
+        && state.theme.dark
+    {
+        let hdc = HDC(wparam.0 as *mut _);
+        let mut rect = RECT::default();
+        let _ = GetClientRect(hwnd, &mut rect);
+        let _ = FillRect(hdc, &rect, state.theme.panel_brush());
+        return LRESULT(1);
+    }
+    DefSubclassProc(hwnd, msg, wparam, lparam)
+}
+
+unsafe extern "system" fn tab_subclass_proc(
+    hwnd: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+    _uidsubclass: usize,
+    refdata: usize,
+) -> LRESULT {
+    let state_ptr = refdata as *mut WindowState;
+    if msg == WM_ERASEBKGND
+        && let Some(state) = state_ptr.as_ref()
+        && state.theme.dark
+    {
+        let hdc = HDC(wparam.0 as *mut _);
+        let mut rect = RECT::default();
+        let _ = GetClientRect(hwnd, &mut rect);
+        let _ = FillRect(hdc, &rect, state.theme.background_brush());
+        return LRESULT(1);
+    }
+    DefSubclassProc(hwnd, msg, wparam, lparam)
+}
+
+unsafe extern "system" fn list_subclass_proc(
+    hwnd: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+    _uidsubclass: usize,
+    refdata: usize,
+) -> LRESULT {
+    let state_ptr = refdata as *mut WindowState;
+    if msg == WM_PAINT
+        && let Some(state) = state_ptr.as_ref()
+        && state.theme.dark
+        && !state.theme.high_contrast
+    {
+        let empty = if state.search.active {
+            state.search.results.is_empty()
+        } else {
+            state.active_tab().visible_item_count() == 0
+        };
+        if empty {
+            let message = if state.search.active {
+                if state.search.pending {
+                    Some("Searching indexed roots...".to_string())
+                } else if let Some(error) = &state.search.error {
+                    Some(error.clone())
+                } else {
+                    Some("No indexed matches.".to_string())
+                }
+            } else if state.active_tab().total_items == 0 {
+                Some(String::from_utf16_lossy(
+                    &state.empty_text[..state.empty_text.len().saturating_sub(1)],
+                ))
+            } else {
+                Some(String::new())
+            };
+
+            let mut ps = PAINTSTRUCT::default();
+            let hdc = BeginPaint(hwnd, &mut ps);
+            let mut rect = RECT::default();
+            let _ = GetClientRect(hwnd, &mut rect);
+            let _ = FillRect(hdc, &rect, state.theme.panel_brush());
+            if let Some(message) = message
+                && !message.is_empty()
+            {
+                let mut text: Vec<u16> = message.encode_utf16().collect();
+                let previous_font = state
+                    .font
+                    .as_ref()
+                    .map(|font| SelectObject(hdc, HGDIOBJ(font.handle().0)));
+                let _ = SetBkMode(hdc, TRANSPARENT);
+                let _ = SetTextColor(hdc, COLORREF(theme::DARK_TEXT_SECONDARY));
+                let _ = DrawTextW(
+                    hdc,
+                    &mut text,
+                    &mut rect,
+                    DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
+                );
+                if let Some(previous) = previous_font {
+                    let _ = SelectObject(hdc, previous);
+                }
+            }
+            let _ = EndPaint(hwnd, &ps);
+            return LRESULT(0);
         }
     }
     DefSubclassProc(hwnd, msg, wparam, lparam)
@@ -1442,6 +2197,9 @@ unsafe extern "system" fn wnd_proc_inner(
             SetWindowLongPtrW(hwnd, GWLP_USERDATA, state_raw as isize);
             let state = &mut *state_raw;
             state.hwnd_main = hwnd;
+            if !state.theme.high_contrast {
+                theme::allow_dark_mode_for_window(hwnd, state.theme.dark);
+            }
 
             let hinst = cs.hInstance;
 
@@ -1562,7 +2320,7 @@ unsafe extern "system" fn wnd_proc_inner(
                 state.hwnd_search,
                 EM_SETCUEBANNER,
                 WPARAM(0),
-                LPARAM(w!("Search this folder (Ctrl+F)").0 as isize),
+                LPARAM(w!("Search all indexed roots (Ctrl+F)").0 as isize),
             );
 
             // 4. Theme & Preview toggle buttons
@@ -1603,7 +2361,7 @@ unsafe extern "system" fn wnd_proc_inner(
                 WINDOW_EX_STYLE::default(),
                 WC_TABCONTROLW,
                 PCWSTR::null(),
-                WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS,
+                WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | WINDOW_STYLE(TCS_OWNERDRAWFIXED),
                 0,
                 0,
                 0,
@@ -1614,6 +2372,13 @@ unsafe extern "system" fn wnd_proc_inner(
                 None,
             )
             .unwrap();
+
+            let _ = SetWindowSubclass(
+                state.hwnd_tabs,
+                Some(tab_subclass_proc),
+                5,
+                state_raw as usize,
+            );
 
             // 6. Sidebar (TreeView)
             state.hwnd_sidebar = CreateWindowExW(
@@ -1663,6 +2428,13 @@ unsafe extern "system" fn wnd_proc_inner(
             )
             .unwrap();
 
+            let _ = SetWindowSubclass(
+                state.hwnd_list,
+                Some(list_subclass_proc),
+                6,
+                state_raw as usize,
+            );
+
             let _ = SendMessageW(
                 state.hwnd_list,
                 LVM_SETEXTENDEDLISTVIEWSTYLE,
@@ -1704,19 +2476,22 @@ unsafe extern "system" fn wnd_proc_inner(
                     LPARAM(image_list),
                 );
             }
-            let empty_text: Vec<u16> = "This folder is empty."
-                .encode_utf16()
-                .chain(Some(0))
-                .collect();
             let _ = SendMessageW(
                 state.hwnd_list,
                 LVM_SETEMPTYTEXT,
                 WPARAM(0),
-                LPARAM(empty_text.as_ptr() as isize),
+                LPARAM(state.empty_text.as_ptr() as isize),
             );
 
             // 8. Preview Pane
-            state.preview_pane = Some(PreviewPane::new(hwnd, hinst));
+            let pane = PreviewPane::new(hwnd, hinst);
+            let _ = SetWindowSubclass(
+                pane.hwnd_container,
+                Some(preview_container_subclass_proc),
+                3,
+                state_raw as usize,
+            );
+            state.preview_pane = Some(pane);
 
             // 9. Status Bar
             state.hwnd_status = CreateWindowExW(
@@ -1734,6 +2509,13 @@ unsafe extern "system" fn wnd_proc_inner(
                 None,
             )
             .unwrap();
+
+            let _ = SetWindowSubclass(
+                state.hwnd_status,
+                Some(status_bar_subclass_proc),
+                4,
+                state_raw as usize,
+            );
 
             // 10. Initial Tab item
             let init_path = state.active_tab().current_path.clone();
@@ -1761,25 +2543,175 @@ unsafe extern "system" fn wnd_proc_inner(
         }
         WM_ERASEBKGND => {
             if let Some(state) = state_ptr.as_ref()
-                && state.is_dark_mode
-                && let Some(brush) = state.dark_background.as_ref()
+                && state.theme.dark
             {
                 let mut rect = RECT::default();
                 let _ = GetClientRect(hwnd, &mut rect);
-                let _ = FillRect(HDC(wparam.0 as *mut _), &rect, brush.handle());
+                let _ = FillRect(
+                    HDC(wparam.0 as *mut _),
+                    &rect,
+                    state.theme.background_brush(),
+                );
                 return LRESULT(1);
             }
             DefWindowProcW(hwnd, msg, wparam, lparam)
         }
-        WM_CTLCOLOREDIT | WM_CTLCOLORSTATIC | WM_CTLCOLORLISTBOX => {
+        WM_CTLCOLOREDIT | WM_CTLCOLORLISTBOX => {
             if let Some(state) = state_ptr.as_ref()
-                && state.is_dark_mode
-                && let Some(brush) = state.dark_control.as_ref()
+                && state.theme.dark
             {
                 let hdc = HDC(wparam.0 as *mut _);
-                let _ = SetTextColor(hdc, COLORREF(0x00F0F0F0));
-                let _ = SetBkColor(hdc, COLORREF(0x002C2C2C));
-                return LRESULT(brush.handle().0 as isize);
+                let _ = SetTextColor(hdc, COLORREF(theme::DARK_TEXT));
+                let _ = SetBkColor(hdc, COLORREF(theme::DARK_INPUT));
+                return LRESULT(state.theme.input_brush().0 as isize);
+            }
+            DefWindowProcW(hwnd, msg, wparam, lparam)
+        }
+        WM_CTLCOLORSTATIC | WM_CTLCOLORBTN => {
+            if let Some(state) = state_ptr.as_ref()
+                && state.theme.dark
+            {
+                let hdc = HDC(wparam.0 as *mut _);
+                let _ = SetTextColor(hdc, COLORREF(theme::DARK_TEXT));
+                let _ = SetBkColor(hdc, COLORREF(theme::DARK_PANEL));
+                let _ = SetBkMode(hdc, TRANSPARENT);
+                return LRESULT(state.theme.panel_brush().0 as isize);
+            }
+            DefWindowProcW(hwnd, msg, wparam, lparam)
+        }
+        WM_DRAWITEM => {
+            if let Some(state) = state_ptr.as_ref() {
+                let draw = &*(lparam.0 as *const DRAWITEMSTRUCT);
+                if draw.hwndItem == state.hwnd_status && state.theme.dark {
+                    let part = draw.itemID as usize;
+                    let text = state
+                        .status_parts
+                        .get(part)
+                        .map(String::as_str)
+                        .unwrap_or("");
+                    unsafe {
+                        let _ = FillRect(draw.hDC, &draw.rcItem, state.theme.panel_brush());
+                        let _ = SetBkMode(draw.hDC, TRANSPARENT);
+                        let _ = SetTextColor(
+                            draw.hDC,
+                            COLORREF(if part == 0 {
+                                theme::DARK_TEXT
+                            } else {
+                                theme::DARK_TEXT_SECONDARY
+                            }),
+                        );
+                        let previous_font = state
+                            .font
+                            .as_ref()
+                            .map(|font| SelectObject(draw.hDC, HGDIOBJ(font.handle().0)));
+                        let mut wide: Vec<u16> = text.encode_utf16().collect();
+                        let mut rect = draw.rcItem;
+                        let pad = state.scale(6);
+                        rect.left += pad;
+                        rect.right -= pad;
+                        if !wide.is_empty() {
+                            let _ = DrawTextW(
+                                draw.hDC,
+                                &mut wide,
+                                &mut rect,
+                                DT_SINGLELINE
+                                    | DT_VCENTER
+                                    | DT_LEFT
+                                    | DT_END_ELLIPSIS
+                                    | DT_NOPREFIX,
+                            );
+                        }
+                        if let Some(previous) = previous_font {
+                            let _ = SelectObject(draw.hDC, previous);
+                        }
+                    }
+                    return LRESULT(1);
+                }
+
+                if draw.hwndItem == state.hwnd_tabs {
+                    let selected = unsafe {
+                        SendMessageW(state.hwnd_tabs, TCM_GETCURSEL, WPARAM(0), LPARAM(0)).0
+                    } as usize;
+                    let is_selected = draw.itemID as usize == selected;
+                    let dark = state.theme.dark && !state.theme.high_contrast;
+                    let mut text = [0u16; 256];
+                    let mut item = TCITEMW {
+                        mask: TCIF_TEXT,
+                        pszText: PWSTR(text.as_mut_ptr()),
+                        cchTextMax: text.len() as i32,
+                        ..Default::default()
+                    };
+                    unsafe {
+                        let _ = SendMessageW(
+                            state.hwnd_tabs,
+                            TCM_GETITEMW,
+                            WPARAM(draw.itemID as usize),
+                            LPARAM(&mut item as *mut _ as isize),
+                        );
+                        let length = text.iter().position(|&c| c == 0).unwrap_or(text.len());
+                        let text_str = String::from_utf16_lossy(&text[..length]);
+                        let (brush, text_color, accent_brush) = if dark {
+                            (
+                                if is_selected {
+                                    state.theme.panel_brush()
+                                } else {
+                                    state.theme.background_brush()
+                                },
+                                COLORREF(if is_selected {
+                                    theme::DARK_TEXT
+                                } else {
+                                    theme::DARK_TEXT_SECONDARY
+                                }),
+                                state.theme.accent_brush(),
+                            )
+                        } else {
+                            (
+                                GetSysColorBrush(if is_selected {
+                                    COLOR_WINDOW
+                                } else {
+                                    COLOR_BTNFACE
+                                }),
+                                COLORREF(GetSysColor(COLOR_WINDOWTEXT)),
+                                GetSysColorBrush(COLOR_HIGHLIGHT),
+                            )
+                        };
+                        let _ = FillRect(draw.hDC, &draw.rcItem, brush);
+                        if is_selected && dark {
+                            let mut accent_rect = draw.rcItem;
+                            accent_rect.top = accent_rect.bottom - state.scale(2);
+                            accent_rect.left += state.scale(4);
+                            accent_rect.right -= state.scale(4);
+                            let _ = FillRect(draw.hDC, &accent_rect, accent_brush);
+                        }
+                        let _ = SetBkMode(draw.hDC, TRANSPARENT);
+                        let _ = SetTextColor(draw.hDC, text_color);
+                        let previous_font = state
+                            .font
+                            .as_ref()
+                            .map(|font| SelectObject(draw.hDC, HGDIOBJ(font.handle().0)));
+                        let mut wide: Vec<u16> = text_str.encode_utf16().collect();
+                        if !wide.is_empty() {
+                            let mut rect = draw.rcItem;
+                            rect.left += state.scale(6);
+                            rect.right -= state.scale(6);
+                            rect.top += state.scale(2);
+                            let _ = DrawTextW(
+                                draw.hDC,
+                                &mut wide,
+                                &mut rect,
+                                DT_CENTER
+                                    | DT_VCENTER
+                                    | DT_SINGLELINE
+                                    | DT_END_ELLIPSIS
+                                    | DT_NOPREFIX,
+                            );
+                        }
+                        if let Some(previous) = previous_font {
+                            let _ = SelectObject(draw.hDC, previous);
+                        }
+                    }
+                    return LRESULT(1);
+                }
             }
             DefWindowProcW(hwnd, msg, wparam, lparam)
         }
@@ -1825,18 +2757,13 @@ unsafe extern "system" fn wnd_proc_inner(
             let code = ((wparam.0 >> 16) & 0xffff) as u16;
 
             if let Some(state) = state_ptr.as_mut() {
-                // Live in-folder filtering on EN_CHANGE
+                // Deep indexed search on every text change.
                 if id == IDC_EDIT_SEARCH && code as u32 == EN_CHANGE {
                     let len = GetWindowTextLengthW(state.hwnd_search) as usize;
                     let mut buf = vec![0u16; len + 1];
                     let copied = GetWindowTextW(state.hwnd_search, &mut buf) as usize;
                     let query = String::from_utf16_lossy(&buf[..copied]);
-                    state.active_tab_mut().set_filter(&query);
-                    let count = state.active_tab().visible_item_count();
-                    let _ =
-                        SendMessageW(state.hwnd_list, LVM_SETITEMCOUNT, WPARAM(count), LPARAM(1));
-                    let _ = InvalidateRect(state.hwnd_list, None, true);
-                    state.update_status_bar();
+                    state.on_search_changed(&query);
                     return LRESULT(0);
                 }
 
@@ -1860,7 +2787,7 @@ unsafe extern "system" fn wnd_proc_inner(
                         state.trigger_refresh();
                     }
                     IDC_BTN_THEME | ID_ACTION_TOGGLE_DARK_MODE => {
-                        state.action_toggle_dark_mode();
+                        state.action_cycle_theme();
                     }
                     IDC_BTN_PREVIEW | ID_ACTION_TOGGLE_PREVIEW => {
                         state.action_toggle_preview();
@@ -1921,6 +2848,15 @@ unsafe extern "system" fn wnd_proc_inner(
                     }
                     ID_ACTION_OPEN => {
                         state.open_selected_item();
+                    }
+                    ID_ACTION_SEARCH_OPEN_CONTAINING => {
+                        state.open_selected_search_containing_folder();
+                    }
+                    ID_ACTION_SEARCH_COPY_PATH => {
+                        state.copy_selected_search_path();
+                    }
+                    ID_ACTION_SEARCH_CLEAR => {
+                        state.exit_search(true);
                     }
                     ID_ACTION_OPEN_EXPLORER => {
                         state.action_open_in_explorer();
@@ -1983,11 +2919,33 @@ unsafe extern "system" fn wnd_proc_inner(
                             let sub_idx = plvdi.item.iSubItem;
 
                             if (plvdi.item.mask.0 & LVIF_IMAGE.0) != 0 {
-                                plvdi.item.iImage = state.icon_index_for(row_idx);
+                                plvdi.item.iImage = if state.search.active {
+                                    state.search_icon_index(row_idx)
+                                } else {
+                                    state.icon_index_for(row_idx)
+                                };
                             }
 
                             if (plvdi.item.mask.0 & LVIF_TEXT.0) != 0 {
-                                if let Some(entry) = state.active_tab().get_visible_entry(row_idx) {
+                                if state.search.active {
+                                    let text = state
+                                        .search
+                                        .results
+                                        .get(row_idx)
+                                        .map(|item| match sub_idx {
+                                            0 => item.display_name.clone(),
+                                            1 => explorer_win::path::to_display_string(
+                                                std::path::Path::new(&item.path),
+                                            ),
+                                            2 => format_size(item.size_bytes),
+                                            3 => format_modified(item.modified_filetime),
+                                            _ => String::new(),
+                                        })
+                                        .unwrap_or_default();
+                                    fill_listview_text(plvdi, &text);
+                                } else if let Some(entry) =
+                                    state.active_tab().get_visible_entry(row_idx)
+                                {
                                     let text = match sub_idx {
                                         0 => entry.display_name.clone(),
                                         1 => match entry.kind {
@@ -2006,76 +2964,25 @@ unsafe extern "system" fn wnd_proc_inner(
                                                 }
                                             }
                                         },
-                                        2 => {
-                                            if let Some(bytes) = entry.size_bytes {
-                                                if bytes >= 1024 * 1024 {
-                                                    format!(
-                                                        "{:.2} MB",
-                                                        bytes as f64 / (1024.0 * 1024.0)
-                                                    )
-                                                } else if bytes >= 1024 {
-                                                    format!("{:.1} KB", bytes as f64 / 1024.0)
-                                                } else {
-                                                    format!("{} B", bytes)
-                                                }
-                                            } else {
-                                                String::new()
-                                            }
-                                        }
-                                        3 => {
-                                            if let Some(ft) = entry.modified_filetime {
-                                                // Windows FileTime to YYYY-MM-DD HH:MM
-                                                let st = filetime_to_systemtime(ft);
-                                                format!(
-                                                    "{:04}-{:02}-{:02} {:02}:{:02}",
-                                                    st.wYear,
-                                                    st.wMonth,
-                                                    st.wDay,
-                                                    st.wHour,
-                                                    st.wMinute
-                                                )
-                                            } else {
-                                                String::new()
-                                            }
-                                        }
+                                        2 => format_size(entry.size_bytes),
+                                        3 => format_modified(entry.modified_filetime),
                                         _ => String::new(),
                                     };
-
-                                    let text_utf16: Vec<u16> =
-                                        text.encode_utf16().chain(Some(0)).collect();
-                                    let max_len =
-                                        (plvdi.item.cchTextMax as usize).min(text_utf16.len());
-                                    if !plvdi.item.pszText.is_null() && max_len > 0 {
-                                        std::ptr::copy_nonoverlapping(
-                                            text_utf16.as_ptr(),
-                                            plvdi.item.pszText.0,
-                                            max_len,
-                                        );
-                                        // Ensure NUL terminated
-                                        *plvdi.item.pszText.0.add(max_len - 1) = 0;
-                                    }
+                                    fill_listview_text(plvdi, &text);
                                 } else {
                                     // Missing page: schedule load
                                     let actual_idx = state.active_tab().get_actual_index(row_idx);
                                     let offset = (actual_idx / PAGE_SIZE) * PAGE_SIZE;
                                     state.request_page(offset);
-
-                                    let loading_text: Vec<u16> =
-                                        "...".encode_utf16().chain(Some(0)).collect();
-                                    let max_len =
-                                        (plvdi.item.cchTextMax as usize).min(loading_text.len());
-                                    if !plvdi.item.pszText.is_null() && max_len > 0 {
-                                        std::ptr::copy_nonoverlapping(
-                                            loading_text.as_ptr(),
-                                            plvdi.item.pszText.0,
-                                            max_len,
-                                        );
-                                    }
+                                    fill_listview_text(plvdi, "...");
                                 }
                             }
                             return LRESULT(0);
                         }
                         LVN_ODCACHEHINT => {
+                            if state.search.active {
+                                return LRESULT(0);
+                            }
                             let hint = &*(lparam.0 as *const NMLVCACHEHINT);
                             let from_actual =
                                 state.active_tab().get_actual_index(hint.iFrom as usize);
@@ -2089,6 +2996,9 @@ unsafe extern "system" fn wnd_proc_inner(
                             return LRESULT(0);
                         }
                         LVN_COLUMNCLICK => {
+                            if state.search.active {
+                                return LRESULT(0);
+                            }
                             let nmlv = &*(lparam.0 as *const NMLISTVIEW);
                             let new_col = match nmlv.iSubItem {
                                 0 => SortColumn::Name,
@@ -2113,6 +3023,10 @@ unsafe extern "system" fn wnd_proc_inner(
                         LVN_ITEMCHANGED => {
                             let nmlv = &*(lparam.0 as *const NMLISTVIEW);
                             if (nmlv.uChanged.0 & LVIF_STATE.0) != 0 {
+                                if state.search.active {
+                                    state.update_status_bar();
+                                    return LRESULT(0);
+                                }
                                 let was_sel = (nmlv.uOldState & LVIS_SELECTED.0) != 0;
                                 let is_sel = (nmlv.uNewState & LVIS_SELECTED.0) != 0;
                                 let idx = nmlv.iItem as usize;
@@ -2133,12 +3047,21 @@ unsafe extern "system" fn wnd_proc_inner(
                         NM_RCLICK => {
                             let mut pt = windows::Win32::Foundation::POINT::default();
                             let _ = GetCursorPos(&mut pt);
-                            show_context_menu(
-                                state.hwnd_main,
-                                pt.x,
-                                pt.y,
-                                !state.active_tab().selected_indices.is_empty(),
-                            );
+                            if state.search.active {
+                                show_search_context_menu(
+                                    state.hwnd_main,
+                                    pt.x,
+                                    pt.y,
+                                    state.search_selected_count() > 0,
+                                );
+                            } else {
+                                show_context_menu(
+                                    state.hwnd_main,
+                                    pt.x,
+                                    pt.y,
+                                    !state.active_tab().selected_indices.is_empty(),
+                                );
+                            }
                             return LRESULT(0);
                         }
                         _ => {}
@@ -2151,8 +3074,12 @@ unsafe extern "system" fn wnd_proc_inner(
             let x = (lparam.0 & 0xffff) as i16 as i32;
             let y = ((lparam.0 >> 16) & 0xffff) as i16 as i32;
             if let Some(state) = state_ptr.as_ref() {
-                let has_sel = !state.active_tab().selected_indices.is_empty();
-                show_context_menu(hwnd, x, y, has_sel);
+                if state.search.active {
+                    show_search_context_menu(hwnd, x, y, state.search_selected_count() > 0);
+                } else {
+                    let has_sel = !state.active_tab().selected_indices.is_empty();
+                    show_context_menu(hwnd, x, y, has_sel);
+                }
             }
             LRESULT(0)
         }
@@ -2173,17 +3100,19 @@ unsafe extern "system" fn wnd_proc_inner(
                             {
                                 let before = state.active_tab().visible_item_count();
                                 state.active_tab_mut().apply_page(page);
-                                let count = state.active_tab().visible_item_count();
-                                if count != before {
-                                    let _ = SendMessageW(
-                                        state.hwnd_list,
-                                        LVM_SETITEMCOUNT,
-                                        WPARAM(count),
-                                        LPARAM(1),
-                                    );
-                                    state.update_status_bar();
+                                if !state.search.active {
+                                    let count = state.active_tab().visible_item_count();
+                                    if count != before {
+                                        let _ = SendMessageW(
+                                            state.hwnd_list,
+                                            LVM_SETITEMCOUNT,
+                                            WPARAM(count),
+                                            LPARAM(1),
+                                        );
+                                        state.update_status_bar();
+                                    }
+                                    let _ = InvalidateRect(state.hwnd_list, None, true);
                                 }
-                                let _ = InvalidateRect(state.hwnd_list, None, true);
                             }
                         }
                         UiEvent::NavigationReady(env) | UiEvent::RefreshReady(env) => {
@@ -2199,15 +3128,17 @@ unsafe extern "system" fn wnd_proc_inner(
                                         state.active_tab_mut().apply_navigation(nav);
                                         state.update_address_bar();
                                         state.update_tab_title();
-                                        let count = state.active_tab().visible_item_count();
-                                        let _ = SendMessageW(
-                                            state.hwnd_list,
-                                            LVM_SETITEMCOUNT,
-                                            WPARAM(count),
-                                            LPARAM(1),
-                                        );
-                                        let _ = InvalidateRect(state.hwnd_list, None, true);
-                                        state.update_status_bar();
+                                        if !state.search.active {
+                                            let count = state.active_tab().visible_item_count();
+                                            let _ = SendMessageW(
+                                                state.hwnd_list,
+                                                LVM_SETITEMCOUNT,
+                                                WPARAM(count),
+                                                LPARAM(1),
+                                            );
+                                            let _ = InvalidateRect(state.hwnd_list, None, true);
+                                            state.update_status_bar();
+                                        }
                                         state.update_sort_indicator();
                                         state.subscribe_active_folder();
                                         // Prefetch initial page
@@ -2235,7 +3166,8 @@ unsafe extern "system" fn wnd_proc_inner(
                             }
                         }
                         UiEvent::PreviewReady(env) => {
-                            if let Ok(data) = env.result
+                            if !state.search.active
+                                && let Ok(data) = env.result
                                 && let Some(ref mut pane) = state.preview_pane
                             {
                                 pane.show_preview(&data);
@@ -2251,6 +3183,19 @@ unsafe extern "system" fn wnd_proc_inner(
                                 state.trigger_refresh();
                             }
                         }
+                        UiEvent::StatusMessage(message) => {
+                            state.flash_status(message);
+                        }
+                        UiEvent::SearchIndexFailed(error) => {
+                            state.search.auto_index_pending = false;
+                            state.search.auto_index_attempts = 3;
+                            state.search.error = Some(error.user_message.clone());
+                            state.flash_status(format!(
+                                "Deep search indexing failed: {}",
+                                error.user_message
+                            ));
+                            state.update_status_bar();
+                        }
                         UiEvent::OperationError(err) => {
                             if crate::dialogs::in_modal() {
                                 state.pending_error = Some(err.user_message.clone());
@@ -2259,6 +3204,9 @@ unsafe extern "system" fn wnd_proc_inner(
                             }
                         }
                         UiEvent::WatchNotification(notif) => {
+                            if state.search.active {
+                                continue;
+                            }
                             let active = state
                                 .active_tab()
                                 .current_path
@@ -2276,11 +3224,28 @@ unsafe extern "system" fn wnd_proc_inner(
                             }
                         }
                         UiEvent::SearchReady(env) => {
-                            if let Ok(res) = env.result {
-                                state.flash_status(format!(
-                                    "Found {} indexed matches for \"{}\"",
-                                    res.total_matches, res.query
-                                ));
+                            let current = RequestIdentity::new(
+                                state.session_id.clone(),
+                                state.active_tab().tab_id.clone(),
+                                0,
+                                state.search.generation,
+                            );
+                            if state.search.active && !env.is_stale(&current) {
+                                match env.result {
+                                    Ok(res) => {
+                                        let count = res.results.len();
+                                        state.search.apply(res);
+                                        state.set_list_count(count);
+                                        state.apply_list_colors();
+                                        state.schedule_search_refresh();
+                                        state.update_status_bar();
+                                    }
+                                    Err(err) => {
+                                        state.search.fail(err.user_message.clone());
+                                        state.set_list_count(0);
+                                        state.update_status_bar();
+                                    }
+                                }
                             }
                         }
                     }
@@ -2304,8 +3269,40 @@ unsafe extern "system" fn wnd_proc_inner(
                 if let Some(state) = state_ptr.as_mut() {
                     state.clear_status_message();
                 }
+            } else if wparam.0 == SEARCH_DEBOUNCE_TIMER {
+                unsafe {
+                    let _ = KillTimer(hwnd, SEARCH_DEBOUNCE_TIMER);
+                }
+                if let Some(state) = state_ptr.as_mut()
+                    && state.search.active
+                    && !state.search.query.is_empty()
+                {
+                    state.run_search();
+                }
+            } else if wparam.0 == SEARCH_REFRESH_TIMER {
+                unsafe {
+                    let _ = KillTimer(hwnd, SEARCH_REFRESH_TIMER);
+                }
+                if let Some(state) = state_ptr.as_mut()
+                    && state.search.active
+                    && !state.search.pending
+                    && !state.search.query.is_empty()
+                {
+                    state.run_search();
+                }
             }
             LRESULT(0)
+        }
+        WM_SETTINGCHANGE | WM_SYSCOLORCHANGE | WM_THEMECHANGED => {
+            if let Some(state) = state_ptr.as_mut()
+                && !state.theme_applying
+            {
+                let changed = state.theme.refresh();
+                if changed || state.theme.preference == ThemePreference::System {
+                    state.apply_theme();
+                }
+            }
+            DefWindowProcW(hwnd, msg, wparam, lparam)
         }
         WM_CLOSE => {
             if let Some(state) = state_ptr.as_ref() {
@@ -2322,6 +3319,37 @@ unsafe extern "system" fn wnd_proc_inner(
             LRESULT(0)
         }
         _ => DefWindowProcW(hwnd, msg, wparam, lparam),
+    }
+}
+
+fn format_size(bytes: Option<u64>) -> String {
+    match bytes {
+        Some(bytes) if bytes >= 1024 * 1024 => {
+            format!("{:.2} MB", bytes as f64 / (1024.0 * 1024.0))
+        }
+        Some(bytes) if bytes >= 1024 => format!("{:.1} KB", bytes as f64 / 1024.0),
+        Some(bytes) => format!("{} B", bytes),
+        None => String::new(),
+    }
+}
+
+fn format_modified(filetime: Option<u64>) -> String {
+    let Some(filetime) = filetime else {
+        return String::new();
+    };
+    let st = filetime_to_systemtime(filetime);
+    format!(
+        "{:04}-{:02}-{:02} {:02}:{:02}",
+        st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute
+    )
+}
+
+unsafe fn fill_listview_text(plvdi: &mut NMLVDISPINFOW, text: &str) {
+    let text_utf16: Vec<u16> = text.encode_utf16().chain(Some(0)).collect();
+    let max_len = (plvdi.item.cchTextMax as usize).min(text_utf16.len());
+    if !plvdi.item.pszText.is_null() && max_len > 0 {
+        std::ptr::copy_nonoverlapping(text_utf16.as_ptr(), plvdi.item.pszText.0, max_len);
+        *plvdi.item.pszText.0.add(max_len - 1) = 0;
     }
 }
 
@@ -2474,6 +3502,55 @@ fn show_context_menu(hwnd: HWND, x: i32, y: i32, has_selection: bool) {
     }
 }
 
+fn show_search_context_menu(hwnd: HWND, x: i32, y: i32, has_selection: bool) {
+    let _modal = crate::dialogs::modal_scope();
+    unsafe {
+        let hmenu = CreatePopupMenu().unwrap();
+        let flag = |enabled: bool| {
+            if enabled {
+                MF_STRING
+            } else {
+                MF_STRING | MF_GRAYED
+            }
+        };
+
+        let _ = AppendMenuW(
+            hmenu,
+            flag(has_selection),
+            ID_ACTION_OPEN as usize,
+            w!("Open"),
+        );
+        let _ = AppendMenuW(
+            hmenu,
+            flag(has_selection),
+            ID_ACTION_SEARCH_OPEN_CONTAINING as usize,
+            w!("Open containing folder"),
+        );
+        let _ = AppendMenuW(
+            hmenu,
+            flag(has_selection),
+            ID_ACTION_SEARCH_COPY_PATH as usize,
+            w!("Copy path"),
+        );
+        let _ = AppendMenuW(hmenu, MF_SEPARATOR, 0, PCWSTR::null());
+        let _ = AppendMenuW(
+            hmenu,
+            MF_STRING,
+            ID_ACTION_SEARCH_CLEAR as usize,
+            w!("Clear search"),
+        );
+        let _ = AppendMenuW(
+            hmenu,
+            MF_STRING,
+            ID_ACTION_ROOTS_MANAGER as usize,
+            w!("Indexed Roots Manager..."),
+        );
+
+        let _ = TrackPopupMenu(hmenu, TPM_RIGHTBUTTON, x, y, 0, hwnd, None);
+        let _ = DestroyMenu(hmenu);
+    }
+}
+
 pub fn create_main_window(
     hinstance: HINSTANCE,
     app_state: Arc<AppState>,
@@ -2481,6 +3558,9 @@ pub fn create_main_window(
     session_id: SessionId,
     initial_path: PathBuf,
 ) -> Result<HWND, windows::core::Error> {
+    let settings = explorer_app::operations::load_settings(&app_state).unwrap_or_default();
+    let theme = ThemeState::new(ThemePreference::from_setting(&settings.theme));
+
     unsafe {
         let mut wc = WNDCLASSEXW::default();
         if GetClassInfoExW(hinstance, CLASS_NAME, &mut wc).is_err() {
@@ -2523,13 +3603,18 @@ pub fn create_main_window(
             dpi: 96,
             font: None,
             nav_font: None,
-            is_dark_mode: false,
+            theme,
+            theme_applying: false,
+            status_parts: Default::default(),
+            search: SearchView::default(),
             next_tab_id: 2,
             watch_refresh_pending: false,
             icon_cache: std::collections::HashMap::new(),
             status_message: None,
-            dark_background: None,
-            dark_control: None,
+            empty_text: "This folder is empty."
+                .encode_utf16()
+                .chain(Some(0))
+                .collect(),
             pending_error: None,
         });
 
@@ -2559,6 +3644,8 @@ pub fn create_main_window(
         state.dispatcher.set_hwnd(hwnd);
 
         state.rebuild_font();
+        state.layout_children();
+        state.apply_theme();
 
         // Start watcher notification forwarding
         let mut notif_rx = state.app_state.watch_service.subscribe_notifications();
@@ -2569,8 +3656,7 @@ pub fn create_main_window(
             }
         });
 
-        // Layout controls, then reveal the window and load the initial folder.
-        state.layout_children();
+        // Reveal the window and load the initial folder.
         let _ = ShowWindow(hwnd, SW_SHOW);
         let _ = UpdateWindow(hwnd);
         state.trigger_navigate(state.active_tab().current_path.clone());

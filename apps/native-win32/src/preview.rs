@@ -1,6 +1,7 @@
 #![allow(dead_code, unsafe_op_in_unsafe_fn)]
 
 use crate::resources::SafeBitmap;
+use crate::theme::{self, ThemeControl};
 use explorer_domain::models::PreviewData;
 use windows::Win32::Foundation::{HINSTANCE, HWND};
 use windows::Win32::UI::WindowsAndMessaging::*;
@@ -22,7 +23,7 @@ impl PreviewPane {
                 WINDOW_EX_STYLE::default(),
                 w!("STATIC"),
                 PCWSTR::null(),
-                WS_CHILD | WS_CLIPCHILDREN | WS_BORDER,
+                WS_CHILD | WS_CLIPCHILDREN,
                 0,
                 0,
                 0,
@@ -122,6 +123,12 @@ impl PreviewPane {
         unsafe {
             let _ = ShowWindow(self.hwnd_container, if visible { SW_SHOW } else { SW_HIDE });
         }
+    }
+
+    pub fn apply_theme(&self, dark: bool) {
+        theme::apply_control_theme(self.hwnd_container, dark, ThemeControl::Button);
+        theme::apply_control_theme(self.hwnd_header, dark, ThemeControl::Button);
+        theme::apply_control_theme(self.hwnd_text, dark, ThemeControl::Edit);
     }
 
     pub fn show_preview(&mut self, data: &PreviewData) {

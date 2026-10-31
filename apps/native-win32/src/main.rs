@@ -8,7 +8,9 @@ mod icons;
 mod presenter;
 mod preview;
 mod resources;
+mod search;
 mod sidebar;
+mod theme;
 mod window;
 
 use controls::*;
