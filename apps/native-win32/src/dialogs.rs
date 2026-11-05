@@ -198,7 +198,7 @@ fn show_dark_message(
         let dark = theme::active_dark();
         let mut state = MessageDialogState {
             hwnd_text: HWND::default(),
-            palette: DialogPalette::new(dark),
+            palette: DialogPalette::new(dark, theme::active_high_contrast()),
             buttons,
             result: None,
             completed: false,
@@ -495,7 +495,7 @@ pub fn prompt_input(
             hwnd_edit: HWND(std::ptr::null_mut()),
             result: None,
             completed: false,
-            palette: DialogPalette::new(theme::active_dark()),
+            palette: DialogPalette::new(theme::active_dark(), theme::active_high_contrast()),
         };
 
         let dpi = GetDpiForWindow(hwnd_parent).max(96) as i32;

@@ -1,0 +1,54 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <linearGradient id="folderBack" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#D44E22"/>
+      <stop offset="100%" stop-color="#922C10"/>
+    </linearGradient>
+    <linearGradient id="folderFront" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#FB8A38"/>
+      <stop offset="100%" stop-color="#C43C14"/>
+    </linearGradient>
+    <linearGradient id="indexCard" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#FCFDFF"/>
+      <stop offset="100%" stop-color="#E2E8F0"/>
+    </linearGradient>
+    <linearGradient id="gearBody" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#242B38"/>
+      <stop offset="100%" stop-color="#12161F"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Back Folder Tab & Body -->
+  <path d="M31 97 C31 74 49 56 72 56 L205 56 C217 56 228 61 236 70 L268 97 L440 97 C463 97 481 115 481 138 L481 404 C481 432 458 455 430 455 L82 455 C54 455 31 432 31 404 Z" fill="url(#folderBack)"/>
+
+  <!-- Inner Fast-Index Card -->
+  <rect x="69" y="113" width="374" height="122" rx="24" fill="url(#indexCard)"/>
+  <rect x="97" y="132" width="102" height="13" rx="6.5" fill="#E05222"/>
+  <rect x="215" y="132" width="138" height="13" rx="6.5" fill="#0EA5E9"/>
+
+  <!-- Front Folder Pocket -->
+  <rect x="31" y="156" width="450" height="300" rx="51" fill="url(#folderFront)" stroke="#84240A" stroke-opacity="0.55" stroke-width="5"/>
+  <path d="M68 161 L444 161" stroke="#FFD6A8" stroke-opacity="0.75" stroke-width="6" stroke-linecap="round"/>
+
+  <!-- Rust Precision Cog + Explorer Compass Emblem -->
+  <g transform="translate(256, 305)">
+    <circle r="90" fill="url(#gearBody)"/>
+    <g fill="url(#gearBody)">
+      <rect x="-14" y="-114" width="28" height="34" rx="4"/>
+      <rect x="-14" y="-114" width="28" height="34" rx="4" transform="rotate(36)"/>
+      <rect x="-14" y="-114" width="28" height="34" rx="4" transform="rotate(72)"/>
+      <rect x="-14" y="-114" width="28" height="34" rx="4" transform="rotate(108)"/>
+      <rect x="-14" y="-114" width="28" height="34" rx="4" transform="rotate(144)"/>
+      <rect x="-14" y="-114" width="28" height="34" rx="4" transform="rotate(180)"/>
+      <rect x="-14" y="-114" width="28" height="34" rx="4" transform="rotate(216)"/>
+      <rect x="-14" y="-114" width="28" height="34" rx="4" transform="rotate(252)"/>
+      <rect x="-14" y="-114" width="28" height="34" rx="4" transform="rotate(288)"/>
+      <rect x="-14" y="-114" width="28" height="34" rx="4" transform="rotate(324)"/>
+    </g>
+    <circle r="71" fill="#242C3A" stroke="#6C7C98" stroke-width="6"/>
+    <circle r="51" fill="#0D131E" stroke="#38BDF8" stroke-width="9"/>
+    <polygon points="27,-27 10,10 -10,-10" fill="#FBBF24"/>
+    <polygon points="-27,27 10,10 -10,-10" fill="#38BDF8"/>
+    <circle r="8.5" fill="#FFFFFF"/>
+  </g>
+</svg>

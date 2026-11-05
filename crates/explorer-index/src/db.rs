@@ -2,13 +2,33 @@ use explorer_domain::errors::{ErrorCode, ExplorerError};
 use explorer_win::path::{path_to_wide, to_display_string, wide_to_path};
 use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::os::windows::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use tracing::{debug, info};
 
 pub const MAX_INDEXED_ROOTS: usize = 8;
+const MAX_POOLED_READERS: usize = 4;
+const SCHEMA_VERSION: i32 = 1;
 
+const WRITER_PRAGMAS: &str = "
+    PRAGMA journal_mode = WAL;
+    PRAGMA synchronous = NORMAL;
+    PRAGMA foreign_keys = ON;
+    PRAGMA busy_timeout = 5000;
+    PRAGMA cache_size = -16384;
+    PRAGMA mmap_size = 268435456;
+    PRAGMA temp_store = MEMORY;
+";
+
+const READER_PRAGMAS: &str = "
+    PRAGMA query_only = ON;
+    PRAGMA busy_timeout = 5000;
+    PRAGMA cache_size = -16384;
+    PRAGMA mmap_size = 268435456;
+    PRAGMA temp_store = MEMORY;
+";
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RootState {
@@ -79,23 +99,39 @@ pub struct IndexEntryRecord {
 }
 
 /// Thread-safe wrapper around the SQLite index database connection.
+enum ReaderPool {
+    File {
+        path: PathBuf,
+        idle: Mutex<Vec<Connection>>,
+    },
+    InMemory(Arc<Mutex<Connection>>),
+}
+
 pub struct IndexDb {
-    conn: Arc<Mutex<Connection>>,
+    writer: Arc<Mutex<Connection>>,
+    readers: ReaderPool,
+}
+
+fn db_err(op: &'static str, msg: impl Into<String>) -> ExplorerError {
+    ExplorerError::new(ErrorCode::Internal, msg, op)
 }
 
 impl IndexDb {
     /// Opens the index database at the specified path and initializes the schema.
     pub fn open(path: &Path) -> Result<Self, ExplorerError> {
         let conn = Connection::open(path).map_err(|e| {
-            ExplorerError::new(
-                ErrorCode::Internal,
-                format!("Failed to open index database at {}: {e}", path.display()),
+            db_err(
                 "IndexDb::open",
+                format!("Failed to open index database at {}: {e}", path.display()),
             )
         })?;
 
         let db = Self {
-            conn: Arc::new(Mutex::new(conn)),
+            writer: Arc::new(Mutex::new(conn)),
+            readers: ReaderPool::File {
+                path: path.to_path_buf(),
+                idle: Mutex::new(Vec::with_capacity(MAX_POOLED_READERS)),
+            },
         };
         db.init_schema()?;
         Ok(db)
@@ -104,30 +140,69 @@ impl IndexDb {
     /// Opens an in-memory index database for tests.
     pub fn open_in_memory() -> Result<Self, ExplorerError> {
         let conn = Connection::open_in_memory().map_err(|e| {
-            ExplorerError::new(
-                ErrorCode::Internal,
-                format!("Failed to open in-memory index database: {e}"),
+            db_err(
                 "IndexDb::open_in_memory",
+                format!("Failed to open in-memory index database: {e}"),
             )
         })?;
-
+        let writer = Arc::new(Mutex::new(conn));
         let db = Self {
-            conn: Arc::new(Mutex::new(conn)),
+            writer: writer.clone(),
+            readers: ReaderPool::InMemory(writer),
         };
         db.init_schema()?;
         Ok(db)
     }
 
-    /// Initializes pragmas, metadata tables, FTS5 trigram table, and synchronization triggers.
+    /// Runs a read-only closure on an isolated reader connection when backed by a
+    /// file (so background crawler writes never block queries or root lookups), or
+    /// on the shared in-memory connection in tests.
+    pub(crate) fn read<T>(
+        &self,
+        op: &'static str,
+        f: impl FnOnce(&Connection) -> Result<T, ExplorerError>,
+    ) -> Result<T, ExplorerError> {
+        match &self.readers {
+            ReaderPool::InMemory(writer) => {
+                let conn = writer.lock().unwrap();
+                f(&conn)
+            }
+            ReaderPool::File { path, idle } => {
+                let conn = match idle.lock().unwrap().pop() {
+                    Some(conn) => conn,
+                    None => {
+                        let conn = Connection::open(path).map_err(|e| {
+                            db_err(op, format!("Failed to open index reader connection: {e}"))
+                        })?;
+                        conn.execute_batch(READER_PRAGMAS).map_err(|e| {
+                            db_err(op, format!("Failed to configure index reader: {e}"))
+                        })?;
+                        conn
+                    }
+                };
+                let result = f(&conn);
+                let mut pool = idle.lock().unwrap();
+                if pool.len() < MAX_POOLED_READERS {
+                    pool.push(conn);
+                }
+                result
+            }
+        }
+    }
+
+    /// Initializes pragmas, metadata tables, FTS5 trigram table, synchronization triggers,
+    /// and runs idempotent migrations for existing databases.
     pub fn init_schema(&self) -> Result<(), ExplorerError> {
-        let conn = self.conn.lock().unwrap();
+        let mut conn = self.writer.lock().unwrap();
+        conn.execute_batch(WRITER_PRAGMAS).map_err(|e| {
+            db_err(
+                "IndexDb::init_schema",
+                format!("Failed to apply writer pragmas: {e}"),
+            )
+        })?;
 
         conn.execute_batch(
             "
-            PRAGMA journal_mode = WAL;
-            PRAGMA foreign_keys = ON;
-            PRAGMA busy_timeout = 5000;
-
             CREATE TABLE IF NOT EXISTS roots (
                 id TEXT PRIMARY KEY,
                 path_utf16le BLOB NOT NULL,
@@ -160,6 +235,8 @@ impl IndexDb {
             CREATE INDEX IF NOT EXISTS entries_parent_id ON entries(parent_id);
             CREATE INDEX IF NOT EXISTS entries_root_id ON entries(root_id);
             CREATE INDEX IF NOT EXISTS entries_extension ON entries(root_id, extension_norm, kind);
+            CREATE INDEX IF NOT EXISTS entries_extension_norm ON entries(extension_norm, kind);
+            CREATE INDEX IF NOT EXISTS entries_name_norm ON entries(name_norm);
             CREATE INDEX IF NOT EXISTS entries_root_seen ON entries(root_id, seen_epoch);
 
             CREATE VIRTUAL TABLE IF NOT EXISTS filename_fts USING fts5(
@@ -174,31 +251,85 @@ impl IndexDb {
             CREATE TRIGGER IF NOT EXISTS entries_ad AFTER DELETE ON entries BEGIN
                 DELETE FROM filename_fts WHERE rowid = old.id;
             END;
-
-            CREATE TRIGGER IF NOT EXISTS entries_au AFTER UPDATE OF name_norm ON entries BEGIN
-                UPDATE filename_fts SET name_norm = new.name_norm WHERE rowid = old.id;
-            END;
             ",
         )
         .map_err(|e| {
-            ExplorerError::new(
-                ErrorCode::Internal,
-                format!("Failed to initialize index schema: {e}"),
+            db_err(
                 "IndexDb::init_schema",
+                format!("Failed to initialize index schema: {e}"),
             )
         })?;
 
-        debug!("Initialized index database schema with FTS5 trigram virtual table");
+        let version: i32 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap_or(0);
+        if version < SCHEMA_VERSION {
+            Self::migrate_to_v1(&mut conn).map_err(|e| {
+                db_err(
+                    "IndexDb::init_schema",
+                    format!("Failed to migrate index schema to v{SCHEMA_VERSION}: {e}"),
+                )
+            })?;
+        }
+
+        debug!("Initialized index database schema v{SCHEMA_VERSION}");
         Ok(())
     }
 
-    /// Add a new indexed root. Rejects overlap with existing roots and enforces the MAX_INDEXED_ROOTS bound.
+    fn migrate_to_v1(conn: &mut Connection) -> Result<(), rusqlite::Error> {
+        let dup_ids: Vec<String> = {
+            let mut stmt = conn.prepare(
+                "SELECT id FROM roots
+                 WHERE rowid NOT IN (SELECT MIN(rowid) FROM roots GROUP BY path_utf16le)",
+            )?;
+            let rows = stmt.query_map([], |row| row.get(0))?;
+            rows.collect::<Result<Vec<_>, _>>()?
+        };
+
+        if !dup_ids.is_empty() {
+            conn.execute_batch("PRAGMA foreign_keys = OFF;")?;
+            let res = (|| -> Result<(), rusqlite::Error> {
+                let tx = conn.transaction()?;
+                for id in &dup_ids {
+                    tx.execute("DELETE FROM entries WHERE root_id = ?1", params![id])?;
+                    tx.execute("DELETE FROM roots WHERE id = ?1", params![id])?;
+                }
+                tx.commit()
+            })();
+            let _ = conn.execute_batch("PRAGMA foreign_keys = ON;");
+            res?;
+            info!("Removed {} duplicate indexed root(s)", dup_ids.len());
+        }
+
+        conn.execute_batch(
+            "
+            CREATE UNIQUE INDEX IF NOT EXISTS roots_path_utf16le ON roots(path_utf16le);
+            DROP TRIGGER IF EXISTS entries_au;
+            CREATE TRIGGER entries_au AFTER UPDATE OF name_norm ON entries
+            WHEN old.name_norm IS NOT new.name_norm BEGIN
+                UPDATE filename_fts SET name_norm = new.name_norm WHERE rowid = old.id;
+            END;
+            PRAGMA user_version = 1;
+            ",
+        )
+    }
+
+    /// Add a new indexed root atomically. Rejects overlap with existing roots and
+    /// enforces the MAX_INDEXED_ROOTS bound under a single writer transaction.
     pub fn add_root(&self, path: &Path) -> Result<IndexedRoot, ExplorerError> {
         let canonical = normalize_root_path(path);
         let display_str = to_display_string(&canonical);
         let wide_bytes = wide_to_bytes(&path_to_wide(&canonical));
 
-        let existing = self.list_roots()?;
+        let mut conn = self.writer.lock().unwrap();
+        let tx = conn.transaction().map_err(|e| {
+            db_err(
+                "IndexDb::add_root",
+                format!("Failed to begin transaction: {e}"),
+            )
+        })?;
+
+        let existing = Self::query_roots(&tx, "IndexDb::add_root")?;
         if existing.len() >= MAX_INDEXED_ROOTS {
             return Err(ExplorerError::new(
                 ErrorCode::QueueFull,
@@ -207,7 +338,6 @@ impl IndexDb {
             ));
         }
 
-        // Check duplicate and overlapping roots
         for r in &existing {
             if r.path == canonical {
                 return Err(ExplorerError::new(
@@ -241,16 +371,20 @@ impl IndexDb {
         let root_id = uuid::Uuid::new_v4().to_string();
         let state = RootState::NotIndexed;
 
-        let conn = self.conn.lock().unwrap();
-        conn.execute(
+        tx.execute(
             "INSERT INTO roots (id, path_utf16le, display_path, state, completed_epoch) VALUES (?1, ?2, ?3, ?4, 0)",
             params![root_id, wide_bytes, display_str, state.as_str()],
         )
         .map_err(|e| {
-            ExplorerError::new(
-                ErrorCode::Internal,
-                format!("Failed to insert root into database: {e}"),
+            db_err(
                 "IndexDb::add_root",
+                format!("Failed to insert root into database: {e}"),
+            )
+        })?;
+        tx.commit().map_err(|e| {
+            db_err(
+                "IndexDb::add_root",
+                format!("Failed to commit root registration: {e}"),
             )
         })?;
 
@@ -269,18 +403,17 @@ impl IndexDb {
         })
     }
 
-    /// List all indexed roots.
+    /// List all indexed roots via a reader connection.
     pub fn list_roots(&self) -> Result<Vec<IndexedRoot>, ExplorerError> {
-        let conn = self.conn.lock().unwrap();
+        self.read("IndexDb::list_roots", |conn| {
+            Self::query_roots(conn, "IndexDb::list_roots")
+        })
+    }
+
+    fn query_roots(conn: &Connection, op: &'static str) -> Result<Vec<IndexedRoot>, ExplorerError> {
         let mut stmt = conn
             .prepare("SELECT id, path_utf16le, display_path, state, completed_epoch, reconciled_at FROM roots")
-            .map_err(|e| {
-                ExplorerError::new(
-                    ErrorCode::Internal,
-                    format!("Failed to prepare list_roots query: {e}"),
-                    "IndexDb::list_roots",
-                )
-            })?;
+            .map_err(|e| db_err(op, format!("Failed to prepare list_roots query: {e}")))?;
 
         let rows = stmt
             .query_map([], |row| {
@@ -302,29 +435,19 @@ impl IndexDb {
                     reconciled_at,
                 })
             })
-            .map_err(|e| {
-                ExplorerError::new(
-                    ErrorCode::Internal,
-                    format!("Failed to query roots: {e}"),
-                    "IndexDb::list_roots",
-                )
-            })?;
+            .map_err(|e| db_err(op, format!("Failed to query roots: {e}")))?;
 
-        let list = rows.flatten().collect();
-        Ok(list)
+        Ok(rows.flatten().collect())
     }
 
     /// Removes an indexed root and all associated metadata and FTS entries.
     pub fn remove_root(&self, root_id: &str) -> Result<(), ExplorerError> {
-        let conn = self.conn.lock().unwrap();
-        // Turn foreign keys off temporarily during mass deletion so SQLite does not perform
-        // redundant recursive O(N^2) parent-child cascade scans when bulk deleting entries.
+        let conn = self.writer.lock().unwrap();
         conn.execute_batch("PRAGMA foreign_keys = OFF")
             .map_err(|e| {
-                ExplorerError::new(
-                    ErrorCode::Internal,
-                    format!("Failed to disable foreign keys: {e}"),
+                db_err(
                     "IndexDb::remove_root",
+                    format!("Failed to disable foreign keys: {e}"),
                 )
             })?;
 
@@ -335,12 +458,10 @@ impl IndexDb {
         })();
 
         let _ = conn.execute_batch("PRAGMA foreign_keys = ON");
-
         res.map_err(|e| {
-            ExplorerError::new(
-                ErrorCode::Internal,
-                format!("Failed to delete root {root_id}: {e}"),
+            db_err(
                 "IndexDb::remove_root",
+                format!("Failed to delete root {root_id}: {e}"),
             )
         })?;
 
@@ -350,38 +471,35 @@ impl IndexDb {
 
     /// Check whether a root still exists in the database.
     pub fn root_exists(&self, root_id: &str) -> Result<bool, ExplorerError> {
-        let conn = self.conn.lock().unwrap();
-        let mut stmt = conn
-            .prepare("SELECT 1 FROM roots WHERE id = ?1")
-            .map_err(|e| {
-                ExplorerError::new(
-                    ErrorCode::Internal,
-                    format!("Failed to prepare root existence query: {e}"),
+        self.read("IndexDb::root_exists", |conn| {
+            let mut stmt = conn
+                .prepare("SELECT 1 FROM roots WHERE id = ?1")
+                .map_err(|e| {
+                    db_err(
+                        "IndexDb::root_exists",
+                        format!("Failed to prepare root existence query: {e}"),
+                    )
+                })?;
+            stmt.exists(params![root_id]).map_err(|e| {
+                db_err(
                     "IndexDb::root_exists",
+                    format!("Failed to query root existence: {e}"),
                 )
-            })?;
-        let exists = stmt.exists(params![root_id]).map_err(|e| {
-            ExplorerError::new(
-                ErrorCode::Internal,
-                format!("Failed to query root existence: {e}"),
-                "IndexDb::root_exists",
-            )
-        })?;
-        Ok(exists)
+            })
+        })
     }
 
     /// Update the state of an indexed root.
     pub fn update_root_state(&self, root_id: &str, state: RootState) -> Result<(), ExplorerError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.writer.lock().unwrap();
         conn.execute(
             "UPDATE roots SET state = ?1 WHERE id = ?2",
             params![state.as_str(), root_id],
         )
         .map_err(|e| {
-            ExplorerError::new(
-                ErrorCode::Internal,
-                format!("Failed to update root state: {e}"),
+            db_err(
                 "IndexDb::update_root_state",
+                format!("Failed to update root state: {e}"),
             )
         })?;
         Ok(())
@@ -390,16 +508,15 @@ impl IndexDb {
     /// Mark an indexed root scan as completed.
     pub fn complete_root_scan(&self, root_id: &str, epoch: i64) -> Result<(), ExplorerError> {
         let now = chrono_like_now();
-        let conn = self.conn.lock().unwrap();
+        let conn = self.writer.lock().unwrap();
         conn.execute(
             "UPDATE roots SET state = 'ready', completed_epoch = ?1, reconciled_at = ?2 WHERE id = ?3",
             params![epoch, now, root_id],
         )
         .map_err(|e| {
-            ExplorerError::new(
-                ErrorCode::Internal,
-                format!("Failed to mark root scan complete: {e}"),
+            db_err(
                 "IndexDb::complete_root_scan",
+                format!("Failed to mark root scan complete: {e}"),
             )
         })?;
         Ok(())
@@ -411,18 +528,17 @@ impl IndexDb {
             return Ok(());
         }
 
-        let mut conn = self.conn.lock().unwrap();
+        let mut conn = self.writer.lock().unwrap();
         let tx = conn.transaction().map_err(|e| {
-            ExplorerError::new(
-                ErrorCode::Internal,
-                format!("Failed to begin transaction: {e}"),
+            db_err(
                 "IndexDb::batch_upsert_entries",
+                format!("Failed to begin transaction: {e}"),
             )
         })?;
 
         {
             let mut stmt = tx
-                .prepare(
+                .prepare_cached(
                     "INSERT INTO entries (
                         root_id, parent_id, path_utf16le, name_display, name_norm,
                         extension_norm, kind, size_bytes, modified_filetime,
@@ -440,10 +556,9 @@ impl IndexDb {
                         stale = 0",
                 )
                 .map_err(|e| {
-                    ExplorerError::new(
-                        ErrorCode::Internal,
-                        format!("Failed to prepare upsert entry query: {e}"),
+                    db_err(
                         "IndexDb::batch_upsert_entries",
+                        format!("Failed to prepare upsert entry query: {e}"),
                     )
                 })?;
 
@@ -463,130 +578,250 @@ impl IndexDb {
                     entry.seen_epoch,
                 ])
                 .map_err(|e| {
-                    ExplorerError::new(
-                        ErrorCode::Internal,
-                        format!("Failed to upsert entry {}: {e}", entry.path.display()),
+                    db_err(
                         "IndexDb::batch_upsert_entries",
+                        format!("Failed to upsert entry {}: {e}", entry.path.display()),
                     )
                 })?;
             }
         }
 
         tx.commit().map_err(|e| {
-            ExplorerError::new(
-                ErrorCode::Internal,
-                format!("Failed to commit batch upsert: {e}"),
+            db_err(
                 "IndexDb::batch_upsert_entries",
+                format!("Failed to commit batch upsert: {e}"),
             )
         })?;
-
         Ok(())
     }
 
-    /// Prune stale direct children only after their parent directory was fully enumerated.
-    pub fn prune_unseen_children(
+    /// Prune stale entries for all directories whose enumeration completed during a crawl,
+    /// in a single transaction instead of one transaction per directory.
+    pub fn prune_unseen(
         &self,
         root_id: &str,
-        parent_path: &Path,
+        completed_dirs: &[PathBuf],
         current_epoch: i64,
     ) -> Result<usize, ExplorerError> {
-        let mut conn = self.conn.lock().unwrap();
+        self.prune_unseen_scoped(root_id, None, completed_dirs, current_epoch)
+    }
+
+    /// Prunes stale entries, optionally restricted to a directory subtree via the
+    /// `UNIQUE(root_id, path_utf16le)` B-tree so incremental watch reconciliation
+    /// touches only the changed folder instead of scanning the entire root.
+    pub fn prune_unseen_scoped(
+        &self,
+        root_id: &str,
+        scope_dir: Option<&Path>,
+        completed_dirs: &[PathBuf],
+        current_epoch: i64,
+    ) -> Result<usize, ExplorerError> {
+        if completed_dirs.is_empty() {
+            return Ok(0);
+        }
+
+        let mut conn = self.writer.lock().unwrap();
         let tx = conn.transaction().map_err(|e| {
-            ExplorerError::new(
-                ErrorCode::Internal,
-                format!("Failed to begin scoped prune: {e}"),
-                "IndexDb::prune_unseen_children",
+            db_err(
+                "IndexDb::prune_unseen_scoped",
+                format!("Failed to begin prune transaction: {e}"),
             )
         })?;
 
-        let stale_entries = {
+        let map_row = |row: &rusqlite::Row<'_>| {
+            let id: i64 = row.get(0)?;
+            let path_bytes: Vec<u8> = row.get(1)?;
+            let kind: i32 = row.get(2)?;
+            Ok((id, wide_to_path(&bytes_to_wide(&path_bytes)), kind))
+        };
+
+        let stale_entries = if let Some(dir) = scope_dir {
+            let (lo, hi) = path_prefix_range_bytes(dir);
+            let self_bytes = wide_to_bytes(&path_to_wide(dir));
             let mut stmt = tx
                 .prepare(
-                    "SELECT id, path_utf16le, kind FROM entries WHERE root_id = ?1 AND seen_epoch < ?2",
+                    "SELECT id, path_utf16le, kind FROM entries
+                     WHERE root_id = ?1
+                       AND ((path_utf16le >= ?2 AND path_utf16le < ?3) OR path_utf16le = ?4)
+                       AND seen_epoch < ?5",
                 )
                 .map_err(|e| {
-                    ExplorerError::new(
-                        ErrorCode::Internal,
-                        format!("Failed to query stale entries: {e}"),
-                        "IndexDb::prune_unseen_children",
+                    db_err(
+                        "IndexDb::prune_unseen_scoped",
+                        format!("Failed to prepare scoped stale query: {e}"),
                     )
                 })?;
             let rows = stmt
-                .query_map(params![root_id, current_epoch], |row| {
-                    Ok((
-                        row.get::<_, i64>(0)?,
-                        row.get::<_, Vec<u8>>(1)?,
-                        row.get::<_, i32>(2)?,
-                    ))
-                })
+                .query_map(params![root_id, lo, hi, self_bytes, current_epoch], map_row)
                 .map_err(|e| {
-                    ExplorerError::new(
-                        ErrorCode::Internal,
-                        format!("Failed to enumerate stale entries: {e}"),
-                        "IndexDb::prune_unseen_children",
+                    db_err(
+                        "IndexDb::prune_unseen_scoped",
+                        format!("Failed to enumerate scoped stale entries: {e}"),
                     )
                 })?;
             rows.collect::<Result<Vec<_>, _>>().map_err(|e| {
-                ExplorerError::new(
-                    ErrorCode::Internal,
+                db_err(
+                    "IndexDb::prune_unseen_scoped",
+                    format!("Failed to read scoped stale entries: {e}"),
+                )
+            })?
+        } else {
+            let mut stmt = tx
+                .prepare(
+                    "SELECT id, path_utf16le, kind FROM entries
+                     WHERE root_id = ?1 AND seen_epoch < ?2",
+                )
+                .map_err(|e| {
+                    db_err(
+                        "IndexDb::prune_unseen_scoped",
+                        format!("Failed to prepare stale query: {e}"),
+                    )
+                })?;
+            let rows = stmt
+                .query_map(params![root_id, current_epoch], map_row)
+                .map_err(|e| {
+                    db_err(
+                        "IndexDb::prune_unseen_scoped",
+                        format!("Failed to enumerate stale entries: {e}"),
+                    )
+                })?;
+            rows.collect::<Result<Vec<_>, _>>().map_err(|e| {
+                db_err(
+                    "IndexDb::prune_unseen_scoped",
                     format!("Failed to read stale entries: {e}"),
-                    "IndexDb::prune_unseen_children",
                 )
             })?
         };
+        if stale_entries.is_empty() {
+            return Ok(0);
+        }
 
-        let stale_directories: Vec<PathBuf> = stale_entries
+        let completed_set: HashSet<&Path> = completed_dirs.iter().map(PathBuf::as_path).collect();
+        let removed_dirs: HashSet<&Path> = stale_entries
             .iter()
-            .filter_map(|(_, path_bytes, kind)| {
-                let path = wide_to_path(&bytes_to_wide(path_bytes));
-                (path.parent() == Some(parent_path) && *kind == 1).then_some(path)
-            })
-            .collect();
-        let stale_ids: Vec<i64> = stale_entries
-            .iter()
-            .filter_map(|(id, path_bytes, _)| {
-                let path = wide_to_path(&bytes_to_wide(path_bytes));
-                let is_direct_child = path.parent() == Some(parent_path);
-                let is_orphaned_descendant = stale_directories
-                    .iter()
-                    .any(|directory| path.starts_with(directory));
-                (is_direct_child || is_orphaned_descendant).then_some(*id)
+            .filter_map(|(_, path, kind)| {
+                (*kind == 1 && path.parent().is_some_and(|p| completed_set.contains(p)))
+                    .then_some(path.as_path())
             })
             .collect();
 
         let mut delete_stmt = tx
             .prepare("DELETE FROM entries WHERE id = ?1")
             .map_err(|e| {
-                ExplorerError::new(
-                    ErrorCode::Internal,
-                    format!("Failed to prepare scoped prune: {e}"),
-                    "IndexDb::prune_unseen_children",
+                db_err(
+                    "IndexDb::prune_unseen",
+                    format!("Failed to prepare prune delete: {e}"),
                 )
             })?;
         let mut count = 0;
-        for id in stale_ids {
-            count += delete_stmt.execute(params![id]).map_err(|e| {
-                ExplorerError::new(
-                    ErrorCode::Internal,
-                    format!("Failed to delete stale entry: {e}"),
-                    "IndexDb::prune_unseen_children",
-                )
-            })?;
+        for (id, path, _) in &stale_entries {
+            let direct = path.parent().is_some_and(|p| completed_set.contains(p));
+            let orphaned = !direct
+                && !removed_dirs.is_empty()
+                && path
+                    .parent()
+                    .into_iter()
+                    .flat_map(Path::ancestors)
+                    .any(|anc| removed_dirs.contains(anc));
+            if direct || orphaned {
+                count += delete_stmt.execute(params![id]).map_err(|e| {
+                    db_err(
+                        "IndexDb::prune_unseen",
+                        format!("Failed to delete stale entry: {e}"),
+                    )
+                })?;
+            }
         }
         drop(delete_stmt);
         tx.commit().map_err(|e| {
-            ExplorerError::new(
-                ErrorCode::Internal,
-                format!("Failed to commit scoped prune: {e}"),
-                "IndexDb::prune_unseen_children",
+            db_err(
+                "IndexDb::prune_unseen",
+                format!("Failed to commit prune transaction: {e}"),
             )
         })?;
         Ok(count)
     }
+    /// Resolves the exact stored directory path inside `root_id` (matching case-insensitively
+    /// on relative path components when the caller's path differs in letter case).
+    pub fn resolve_stored_dir(&self, root_id: &str, dir: &Path) -> Option<PathBuf> {
+        let roots = self.list_roots().ok()?;
+        let root = roots.into_iter().find(|r| r.id == root_id)?;
 
-    /// Raw database connection handle for queries.
-    pub fn raw_conn(&self) -> Arc<Mutex<Connection>> {
-        self.conn.clone()
+        let root_stripped = explorer_win::path::strip_extended_prefix(&root.path);
+        let dir_stripped = explorer_win::path::strip_extended_prefix(dir);
+
+        let root_lc = root_stripped.to_string_lossy().to_lowercase();
+        let dir_lc = dir_stripped.to_string_lossy().to_lowercase();
+        let root_trim = root_lc.trim_end_matches(['\\', '/']);
+        let dir_trim = dir_lc.trim_end_matches(['\\', '/']);
+
+        if dir_trim == root_trim {
+            return Some(root.path);
+        }
+        let rest = dir_trim
+            .strip_prefix(root_trim)?
+            .trim_start_matches(['\\', '/']);
+        if rest.is_empty() {
+            return Some(root.path);
+        }
+
+        // Fast path: exact case match against stored `path_utf16le`.
+        let rel_orig = dir_stripped
+            .to_string_lossy()
+            .get(root_stripped.to_string_lossy().len()..)
+            .map(|s| s.trim_matches(['\\', '/']).to_string())
+            .unwrap_or_default();
+        let direct_candidate = if rel_orig.is_empty() {
+            root.path.clone()
+        } else {
+            root.path.join(&rel_orig)
+        };
+        let direct_bytes = wide_to_bytes(&path_to_wide(&direct_candidate));
+
+        self.read("IndexDb::resolve_stored_dir", |conn| {
+            let exists: bool = conn
+                .query_row(
+                    "SELECT 1 FROM entries WHERE root_id = ?1 AND path_utf16le = ?2",
+                    params![root_id, direct_bytes],
+                    |_| Ok(true),
+                )
+                .unwrap_or(false);
+            if exists {
+                return Ok(Some(direct_candidate));
+            }
+
+            // Case-insensitive component walk using `entries_name_norm`.
+            let mut current = root.path.clone();
+            for seg in rest.split(['\\', '/']).filter(|s| !s.is_empty()) {
+                let (lo, hi) = path_prefix_range_bytes(&current);
+                let mut stmt = conn
+                    .prepare(
+                        "SELECT path_utf16le FROM entries INDEXED BY entries_name_norm
+                         WHERE name_norm = ?1
+                           AND root_id = ?2
+                           AND kind = 1
+                           AND path_utf16le >= ?3
+                           AND path_utf16le < ?4",
+                    )
+                    .map_err(|e| db_err("resolve_stored_dir", e.to_string()))?;
+                let rows = stmt
+                    .query_map(params![seg, root_id, lo, hi], |row| {
+                        let b: Vec<u8> = row.get(0)?;
+                        Ok(wide_to_path(&bytes_to_wide(&b)))
+                    })
+                    .map_err(|e| db_err("resolve_stored_dir", e.to_string()))?;
+                let found = rows
+                    .flatten()
+                    .find(|p| p.parent() == Some(current.as_path()));
+                match found {
+                    Some(next) => current = next,
+                    None => return Ok(Some(direct_candidate)),
+                }
+            }
+            Ok(Some(current))
+        })
+        .ok()
+        .flatten()
     }
 }
 
@@ -611,6 +846,25 @@ pub fn bytes_to_wide(bytes: &[u8]) -> Vec<u16> {
         .iter()
         .map(|chunk| u16::from_le_bytes(*chunk))
         .collect()
+}
+
+/// Computes the half-open `[lo, hi)` byte-comparison range on `path_utf16le` that matches
+/// every descendant path inside `dir` (i.e. paths beginning with `<dir>\` in UTF-16LE).
+pub fn path_prefix_range_bytes(dir: &Path) -> (Vec<u8>, Vec<u8>) {
+    let mut units: Vec<u16> = dir.as_os_str().encode_wide().collect();
+    if !matches!(units.last(), Some(92 | 47)) {
+        units.push(92); // '\\'
+    }
+    let lo = wide_to_bytes(&units);
+    let mut hi = lo.clone();
+    for b in hi.iter_mut().rev() {
+        if *b < 0xFF {
+            *b += 1;
+            break;
+        }
+        *b = 0;
+    }
+    (lo, hi)
 }
 
 fn chrono_like_now() -> String {
@@ -658,10 +912,8 @@ mod tests {
         db.batch_upsert_entries(&[entry]).expect("insert entry");
 
         // Verify FTS table was populated by trigger
-        {
-            let conn = db.raw_conn();
-            let guard = conn.lock().unwrap();
-            let mut stmt = guard
+        db.read("test", |conn| {
+            let mut stmt = conn
                 .prepare(
                     "SELECT rowid, name_norm FROM filename_fts WHERE filename_fts MATCH 'report'",
                 )
@@ -670,19 +922,89 @@ mod tests {
             let row = rows.next().unwrap().expect("found match in fts");
             let fts_name: String = row.get(1).unwrap();
             assert_eq!(fts_name, "report.pdf");
-        }
+            Ok(())
+        })
+        .unwrap();
 
         // Delete root -> entries and FTS rows cleaned up via CASCADE and trigger
         db.remove_root(&root.id).expect("remove root");
         let roots = db.list_roots().unwrap();
         assert!(roots.is_empty());
 
-        {
-            let conn = db.raw_conn();
-            let guard = conn.lock().unwrap();
-            let mut stmt = guard.prepare("SELECT count(*) FROM filename_fts").unwrap();
+        db.read("test", |conn| {
+            let mut stmt = conn.prepare("SELECT count(*) FROM filename_fts").unwrap();
             let count: i64 = stmt.query_row([], |r| r.get(0)).unwrap();
             assert_eq!(count, 0);
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn v1_migration_dedupes_roots_and_skips_unchanged_fts_rewrite() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("legacy.sqlite3");
+        let wide = wide_to_bytes(&path_to_wide(Path::new(r"F:\")));
+
+        // Simulate a v0 database containing duplicate roots and entries.
+        {
+            let raw = Connection::open(&db_path).unwrap();
+            raw.execute_batch(
+                "CREATE TABLE roots (
+                    id TEXT PRIMARY KEY,
+                    path_utf16le BLOB NOT NULL,
+                    display_path TEXT NOT NULL,
+                    volume_key BLOB,
+                    state TEXT NOT NULL,
+                    completed_epoch INTEGER NOT NULL DEFAULT 0,
+                    reconciled_at TEXT
+                );
+                CREATE TABLE entries (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    root_id TEXT NOT NULL,
+                    parent_id INTEGER,
+                    path_utf16le BLOB NOT NULL,
+                    name_display TEXT NOT NULL,
+                    name_norm TEXT NOT NULL,
+                    extension_norm TEXT NOT NULL,
+                    kind INTEGER NOT NULL,
+                    size_bytes INTEGER,
+                    modified_filetime INTEGER,
+                    attributes INTEGER NOT NULL,
+                    file_identity BLOB,
+                    seen_epoch INTEGER NOT NULL,
+                    stale INTEGER NOT NULL DEFAULT 0,
+                    UNIQUE(root_id, path_utf16le)
+                );",
+            )
+            .unwrap();
+            for id in ["root-a", "root-b"] {
+                raw.execute(
+                    "INSERT INTO roots (id, path_utf16le, display_path, state) VALUES (?1, ?2, 'F:\\', 'needs_reconcile')",
+                    params![id, wide],
+                )
+                .unwrap();
+                raw.execute(
+                    "INSERT INTO entries (root_id, path_utf16le, name_display, name_norm, extension_norm, kind, attributes, seen_epoch)
+                     VALUES (?1, ?2, 'a.txt', 'a.txt', 'txt', 0, 32, 1)",
+                    params![id, wide],
+                )
+                .unwrap();
+            }
         }
+
+        let db = IndexDb::open(&db_path).unwrap();
+        let roots = db.list_roots().unwrap();
+        assert_eq!(roots.len(), 1);
+        assert_eq!(roots[0].id, "root-a");
+
+        db.read("test", |conn| {
+            let entries: i64 = conn
+                .query_row("SELECT count(*) FROM entries", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(entries, 1);
+            Ok(())
+        })
+        .unwrap();
     }
 }

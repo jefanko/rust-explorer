@@ -31,6 +31,7 @@ docs/
 # Editors and OS junk
 .vscode/
 .idea/
+.commandcode/
 *.suo
 *.user
 Thumbs.db

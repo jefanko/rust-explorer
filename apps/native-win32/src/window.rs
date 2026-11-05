@@ -11,15 +11,15 @@ use crate::preview::PreviewPane;
 use crate::resources::SafeFont;
 use crate::search::{self, SearchView};
 use crate::sidebar::SidebarManager;
-use crate::theme::{self, DARK_PANEL, ThemeControl, ThemePreference, ThemeState};
+use crate::theme::{self, ThemeControl, ThemePreference, ThemeState};
 use explorer_app::requests::{CompletionEnvelope, PageRequest, RequestIdentity};
 use explorer_app::state::AppState;
 use explorer_domain::ids::{ItemToken, SessionId};
 use explorer_domain::models::{EntryKind, SortColumn, SortDirection};
-use explorer_index::RootState;
 use explorer_win::known_folders::{get_logical_drives, get_standard_known_folders};
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use windows::Win32::Foundation::{COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::UI::Controls::*;
@@ -30,6 +30,27 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::{PCWSTR, PWSTR, w};
 
 const CLASS_NAME: PCWSTR = w!("RustExplorerNativeMainWindow");
+
+struct SlowMessage {
+    msg: u32,
+    started: std::time::Instant,
+}
+
+impl Drop for SlowMessage {
+    fn drop(&mut self) {
+        let ms = self.started.elapsed().as_millis();
+        if ms >= 100 {
+            crate::diagnostics::write_line(&format!("[slow-msg] {:#06x} {}ms", self.msg, ms));
+        }
+    }
+}
+
+fn log_slow(label: &str, started: std::time::Instant) {
+    let ms = started.elapsed().as_millis();
+    if ms >= 50 {
+        crate::diagnostics::write_line(&format!("[slow] {label} {ms}ms"));
+    }
+}
 
 pub struct WindowState {
     pub hwnd_main: HWND,
@@ -280,13 +301,21 @@ impl WindowState {
             return;
         }
 
+        // Never queue searches behind each other: an intermediate query for a
+        // still-typed extension ("mp" on the way to "mp4") must not hold the
+        // index connection while the UI waits for the latest results.
+        if self.search.in_flight.swap(true, Ordering::SeqCst) {
+            self.search.rerun = true;
+            return;
+        }
+
         self.search.active = true;
         self.search.query = query.clone();
         self.search.generation = self.search.generation.wrapping_add(1);
         self.search.pending = true;
         self.search.error = None;
-        self.ensure_index_roots();
 
+        self.search.rerun = false;
         let generation = self.search.generation;
         let identity = RequestIdentity::new(
             self.session_id.clone(),
@@ -296,14 +325,17 @@ impl WindowState {
         );
         let app_state = self.app_state.clone();
         let dispatcher = self.dispatcher.clone();
+        let in_flight = self.search.in_flight.clone();
+        let scope_folder = self.active_tab().current_path.clone();
 
         self.runtime_handle.spawn(async move {
             let q = query;
             let res = tokio::task::spawn_blocking(move || {
-                explorer_app::operations::search_indexed(
+                explorer_app::operations::search_indexed_in_folder(
                     &app_state,
                     &q,
                     None,
+                    Some(scope_folder.as_path()),
                     1,
                     search::RESULT_LIMIT,
                 )
@@ -316,6 +348,7 @@ impl WindowState {
                     "search_indexed",
                 ))
             });
+            in_flight.store(false, Ordering::SeqCst);
             dispatcher.enqueue(UiEvent::SearchReady(CompletionEnvelope {
                 identity,
                 result: res,
@@ -325,23 +358,7 @@ impl WindowState {
         self.update_status_bar();
     }
 
-    fn ensure_index_roots(&mut self) {
-        let roots = match explorer_app::operations::list_indexed_roots(&self.app_state) {
-            Ok(roots) => roots,
-            Err(error) => {
-                self.search.error = Some(error.user_message.clone());
-                return;
-            }
-        };
-
-        self.search.indexing = roots
-            .iter()
-            .any(|root| matches!(root.state, RootState::Scanning | RootState::NotIndexed));
-        if !roots.is_empty() {
-            self.search.auto_index_pending = false;
-            return;
-        }
-
+    fn start_auto_index(&mut self) {
         let path = self.active_tab().current_path.clone();
         if self.search.auto_indexed_path.as_ref() == Some(&path) {
             return;
@@ -366,29 +383,18 @@ impl WindowState {
         });
 
         self.flash_status(format!("Indexing {} for deep search", path.display()));
-        unsafe {
-            let _ = SetTimer(
-                self.hwnd_main,
-                SEARCH_REFRESH_TIMER,
-                search::REFRESH_MS,
-                None,
-            );
-        }
     }
 
-    fn schedule_search_refresh(&mut self) {
-        let roots =
-            explorer_app::operations::list_indexed_roots(&self.app_state).unwrap_or_default();
-        let indexing = roots
-            .iter()
-            .any(|root| matches!(root.state, RootState::Scanning | RootState::NotIndexed));
-        if !roots.is_empty() {
+    fn schedule_search_refresh(&mut self, root_count: usize, indexing: bool) {
+        if root_count > 0 {
             self.search.auto_index_pending = false;
         } else if self.search.auto_index_pending {
             self.search.auto_index_attempts = self.search.auto_index_attempts.saturating_add(1);
             if self.search.auto_index_attempts >= 3 {
                 self.search.auto_index_pending = false;
             }
+        } else {
+            self.start_auto_index();
         }
         self.search.indexing = indexing;
 
@@ -490,8 +496,11 @@ impl WindowState {
     }
 
     fn apply_list_colors(&self) {
-        let (background, text) = if self.theme.dark && !self.theme.high_contrast {
-            (DARK_PANEL, theme::DARK_TEXT)
+        let (background, text) = if !self.theme.high_contrast {
+            (
+                self.theme.panel_color().0,
+                self.theme.primary_text_color().0,
+            )
         } else {
             unsafe { (GetSysColor(COLOR_WINDOW), GetSysColor(COLOR_WINDOWTEXT)) }
         };
@@ -1412,22 +1421,21 @@ impl WindowState {
         }
 
         unsafe {
-            let (gridline_style, status_color, tree_background, tree_text) =
-                if dark && !high_contrast {
-                    (
-                        0,
-                        DARK_PANEL as isize,
-                        DARK_PANEL as isize,
-                        theme::DARK_TEXT as isize,
-                    )
-                } else {
-                    (
-                        LVS_EX_GRIDLINES as isize,
-                        CLR_DEFAULT as isize,
-                        GetSysColor(COLOR_WINDOW) as isize,
-                        GetSysColor(COLOR_WINDOWTEXT) as isize,
-                    )
-                };
+            let (gridline_style, status_color, tree_background, tree_text) = if high_contrast {
+                (
+                    LVS_EX_GRIDLINES as isize,
+                    CLR_DEFAULT as isize,
+                    GetSysColor(COLOR_WINDOW) as isize,
+                    GetSysColor(COLOR_WINDOWTEXT) as isize,
+                )
+            } else {
+                (
+                    if dark { 0 } else { LVS_EX_GRIDLINES as isize },
+                    self.theme.panel_color().0 as isize,
+                    self.theme.panel_color().0 as isize,
+                    self.theme.primary_text_color().0 as isize,
+                )
+            };
             let _ = SendMessageW(
                 self.hwnd_list,
                 LVM_SETEXTENDEDLISTVIEWSTYLE,
@@ -1580,11 +1588,11 @@ impl WindowState {
         };
 
         self.status_parts = [part1, part2, part3];
-        let dark = self.theme.dark;
+        let use_custom_palette = !self.theme.high_contrast;
 
         unsafe {
             for (index, text) in self.status_parts.iter().enumerate() {
-                if dark {
+                if use_custom_palette {
                     let _ = SendMessageW(
                         self.hwnd_status,
                         SB_SETTEXTW,
@@ -1973,7 +1981,7 @@ unsafe extern "system" fn preview_container_subclass_proc(
 ) -> LRESULT {
     let state_ptr = refdata as *mut WindowState;
     if let Some(state) = state_ptr.as_ref()
-        && state.theme.dark
+        && !state.theme.high_contrast
     {
         let hdc = HDC(wparam.0 as *mut _);
         match msg {
@@ -1989,20 +1997,12 @@ unsafe extern "system" fn preview_container_subclass_proc(
                     .preview_pane
                     .as_ref()
                     .is_some_and(|pane| pane.hwnd_text == control);
-                let (text, background, brush) = if is_text {
-                    (
-                        theme::DARK_TEXT,
-                        theme::DARK_INPUT,
-                        state.theme.input_brush(),
-                    )
+                let (background, brush) = if is_text {
+                    (state.theme.input_color().0, state.theme.input_brush())
                 } else {
-                    (
-                        theme::DARK_TEXT,
-                        theme::DARK_PANEL,
-                        state.theme.panel_brush(),
-                    )
+                    (state.theme.panel_color().0, state.theme.panel_brush())
                 };
-                let _ = SetTextColor(hdc, COLORREF(text));
+                let _ = SetTextColor(hdc, state.theme.primary_text_color());
                 let _ = SetBkColor(hdc, COLORREF(background));
                 let _ = SetBkMode(hdc, TRANSPARENT);
                 return LRESULT(brush.0 as isize);
@@ -2024,7 +2024,7 @@ unsafe extern "system" fn status_bar_subclass_proc(
     let state_ptr = refdata as *mut WindowState;
     if msg == WM_ERASEBKGND
         && let Some(state) = state_ptr.as_ref()
-        && state.theme.dark
+        && !state.theme.high_contrast
     {
         let hdc = HDC(wparam.0 as *mut _);
         let mut rect = RECT::default();
@@ -2046,7 +2046,7 @@ unsafe extern "system" fn tab_subclass_proc(
     let state_ptr = refdata as *mut WindowState;
     if msg == WM_ERASEBKGND
         && let Some(state) = state_ptr.as_ref()
-        && state.theme.dark
+        && !state.theme.high_contrast
     {
         let hdc = HDC(wparam.0 as *mut _);
         let mut rect = RECT::default();
@@ -2065,10 +2065,36 @@ unsafe extern "system" fn list_subclass_proc(
     _uidsubclass: usize,
     refdata: usize,
 ) -> LRESULT {
+    let _slow = SlowMessage {
+        msg,
+        started: std::time::Instant::now(),
+    };
     let state_ptr = refdata as *mut WindowState;
+    // The header control is a child of the ListView, so its NM_CUSTOMDRAW
+    // notifications arrive here rather than at the main window procedure.
+    if msg == WM_NOTIFY
+        && let Some(state) = state_ptr.as_ref()
+        && !state.theme.high_contrast
+    {
+        let nmhdr = &*(lparam.0 as *const NMHDR);
+        if nmhdr.code == NM_CUSTOMDRAW {
+            let header = SendMessageW(hwnd, LVM_GETHEADER, WPARAM(0), LPARAM(0));
+            if header.0 != 0 && nmhdr.hwndFrom == HWND(header.0 as *mut _) {
+                let draw = &mut *(lparam.0 as *mut NMCUSTOMDRAW);
+                if draw.dwDrawStage == CDDS_PREPAINT {
+                    return LRESULT(CDRF_NOTIFYITEMDRAW as isize);
+                }
+                if draw.dwDrawStage == CDDS_ITEMPREPAINT {
+                    let _ = SetTextColor(draw.hdc, state.theme.primary_text_color());
+                    let _ = SetBkMode(draw.hdc, TRANSPARENT);
+                    return LRESULT(CDRF_NEWFONT as isize);
+                }
+                return LRESULT(CDRF_DODEFAULT as isize);
+            }
+        }
+    }
     if msg == WM_PAINT
         && let Some(state) = state_ptr.as_ref()
-        && state.theme.dark
         && !state.theme.high_contrast
     {
         let empty = if state.search.active {
@@ -2107,7 +2133,7 @@ unsafe extern "system" fn list_subclass_proc(
                     .as_ref()
                     .map(|font| SelectObject(hdc, HGDIOBJ(font.handle().0)));
                 let _ = SetBkMode(hdc, TRANSPARENT);
-                let _ = SetTextColor(hdc, COLORREF(theme::DARK_TEXT_SECONDARY));
+                let _ = SetTextColor(hdc, state.theme.secondary_text_color());
                 let _ = DrawTextW(
                     hdc,
                     &mut text,
@@ -2154,6 +2180,10 @@ unsafe extern "system" fn wnd_proc_inner(
     wparam: WPARAM,
     lparam: LPARAM,
 ) -> LRESULT {
+    let _slow = SlowMessage {
+        msg,
+        started: std::time::Instant::now(),
+    };
     if crate::diagnostics::trace_enabled() {
         let mut detail = String::new();
         if msg == WM_NOTIFY && lparam.0 != 0 {
@@ -2320,7 +2350,7 @@ unsafe extern "system" fn wnd_proc_inner(
                 state.hwnd_search,
                 EM_SETCUEBANNER,
                 WPARAM(0),
-                LPARAM(w!("Search all indexed roots (Ctrl+F)").0 as isize),
+                LPARAM(w!("Search folder & subfolders (Ctrl+F)").0 as isize),
             );
 
             // 4. Theme & Preview toggle buttons
@@ -2543,7 +2573,7 @@ unsafe extern "system" fn wnd_proc_inner(
         }
         WM_ERASEBKGND => {
             if let Some(state) = state_ptr.as_ref()
-                && state.theme.dark
+                && !state.theme.high_contrast
             {
                 let mut rect = RECT::default();
                 let _ = GetClientRect(hwnd, &mut rect);
@@ -2558,22 +2588,22 @@ unsafe extern "system" fn wnd_proc_inner(
         }
         WM_CTLCOLOREDIT | WM_CTLCOLORLISTBOX => {
             if let Some(state) = state_ptr.as_ref()
-                && state.theme.dark
+                && !state.theme.high_contrast
             {
                 let hdc = HDC(wparam.0 as *mut _);
-                let _ = SetTextColor(hdc, COLORREF(theme::DARK_TEXT));
-                let _ = SetBkColor(hdc, COLORREF(theme::DARK_INPUT));
+                let _ = SetTextColor(hdc, state.theme.primary_text_color());
+                let _ = SetBkColor(hdc, state.theme.input_color());
                 return LRESULT(state.theme.input_brush().0 as isize);
             }
             DefWindowProcW(hwnd, msg, wparam, lparam)
         }
         WM_CTLCOLORSTATIC | WM_CTLCOLORBTN => {
             if let Some(state) = state_ptr.as_ref()
-                && state.theme.dark
+                && !state.theme.high_contrast
             {
                 let hdc = HDC(wparam.0 as *mut _);
-                let _ = SetTextColor(hdc, COLORREF(theme::DARK_TEXT));
-                let _ = SetBkColor(hdc, COLORREF(theme::DARK_PANEL));
+                let _ = SetTextColor(hdc, state.theme.primary_text_color());
+                let _ = SetBkColor(hdc, state.theme.panel_color());
                 let _ = SetBkMode(hdc, TRANSPARENT);
                 return LRESULT(state.theme.panel_brush().0 as isize);
             }
@@ -2582,7 +2612,7 @@ unsafe extern "system" fn wnd_proc_inner(
         WM_DRAWITEM => {
             if let Some(state) = state_ptr.as_ref() {
                 let draw = &*(lparam.0 as *const DRAWITEMSTRUCT);
-                if draw.hwndItem == state.hwnd_status && state.theme.dark {
+                if draw.hwndItem == state.hwnd_status && !state.theme.high_contrast {
                     let part = draw.itemID as usize;
                     let text = state
                         .status_parts
@@ -2594,11 +2624,11 @@ unsafe extern "system" fn wnd_proc_inner(
                         let _ = SetBkMode(draw.hDC, TRANSPARENT);
                         let _ = SetTextColor(
                             draw.hDC,
-                            COLORREF(if part == 0 {
-                                theme::DARK_TEXT
+                            if part == 0 {
+                                state.theme.primary_text_color()
                             } else {
-                                theme::DARK_TEXT_SECONDARY
-                            }),
+                                state.theme.secondary_text_color()
+                            },
                         );
                         let previous_font = state
                             .font
@@ -2650,18 +2680,18 @@ unsafe extern "system" fn wnd_proc_inner(
                         );
                         let length = text.iter().position(|&c| c == 0).unwrap_or(text.len());
                         let text_str = String::from_utf16_lossy(&text[..length]);
-                        let (brush, text_color, accent_brush) = if dark {
+                        let (brush, text_color, accent_brush) = if !state.theme.high_contrast {
                             (
                                 if is_selected {
                                     state.theme.panel_brush()
                                 } else {
                                     state.theme.background_brush()
                                 },
-                                COLORREF(if is_selected {
-                                    theme::DARK_TEXT
+                                if is_selected {
+                                    state.theme.primary_text_color()
                                 } else {
-                                    theme::DARK_TEXT_SECONDARY
-                                }),
+                                    state.theme.secondary_text_color()
+                                },
                                 state.theme.accent_brush(),
                             )
                         } else {
@@ -2920,7 +2950,10 @@ unsafe extern "system" fn wnd_proc_inner(
 
                             if (plvdi.item.mask.0 & LVIF_IMAGE.0) != 0 {
                                 plvdi.item.iImage = if state.search.active {
-                                    state.search_icon_index(row_idx)
+                                    let t = std::time::Instant::now();
+                                    let image = state.search_icon_index(row_idx);
+                                    log_slow(&format!("lvdispinfo.icon row={row_idx}"), t);
+                                    image
                                 } else {
                                     state.icon_index_for(row_idx)
                                 };
@@ -2928,6 +2961,7 @@ unsafe extern "system" fn wnd_proc_inner(
 
                             if (plvdi.item.mask.0 & LVIF_TEXT.0) != 0 {
                                 if state.search.active {
+                                    let t = std::time::Instant::now();
                                     let text = state
                                         .search
                                         .results
@@ -2943,6 +2977,10 @@ unsafe extern "system" fn wnd_proc_inner(
                                         })
                                         .unwrap_or_default();
                                     fill_listview_text(plvdi, &text);
+                                    log_slow(
+                                        &format!("lvdispinfo.text row={row_idx} col={sub_idx}"),
+                                        t,
+                                    );
                                 } else if let Some(entry) =
                                     state.active_tab().get_visible_entry(row_idx)
                                 {
@@ -3207,15 +3245,28 @@ unsafe extern "system" fn wnd_proc_inner(
                             if state.search.active {
                                 continue;
                             }
-                            let active = state
-                                .active_tab()
-                                .current_path
-                                .to_string_lossy()
-                                .to_lowercase();
-                            let changed = notif.dir_path.to_string_lossy().to_lowercase();
+                            let active = explorer_win::path::strip_extended_prefix(
+                                &state.active_tab().current_path,
+                            )
+                            .to_string_lossy()
+                            .trim_end_matches(['\\', '/'])
+                            .to_lowercase();
+                            let changed_dir =
+                                explorer_win::path::strip_extended_prefix(&notif.dir_path)
+                                    .to_string_lossy()
+                                    .trim_end_matches(['\\', '/'])
+                                    .to_lowercase();
                             let relevant = notif.is_overflow
-                                || changed == active
-                                || changed.trim_end_matches('\\') == active.trim_end_matches('\\');
+                                || changed_dir == active
+                                || notif.changes.iter().any(|change| {
+                                    change.path.parent().is_some_and(|parent| {
+                                        explorer_win::path::strip_extended_prefix(parent)
+                                            .to_string_lossy()
+                                            .trim_end_matches(['\\', '/'])
+                                            .to_lowercase()
+                                            == active
+                                    })
+                                });
                             if relevant && !state.watch_refresh_pending {
                                 state.watch_refresh_pending = true;
                                 unsafe {
@@ -3234,11 +3285,23 @@ unsafe extern "system" fn wnd_proc_inner(
                                 match env.result {
                                     Ok(res) => {
                                         let count = res.results.len();
+                                        let root_count = res.root_count;
+                                        let indexing = res.indexing;
+                                        let t = std::time::Instant::now();
                                         state.search.apply(res);
+                                        log_slow("search.apply", t);
+                                        let t = std::time::Instant::now();
                                         state.set_list_count(count);
+                                        log_slow("search.set_list_count", t);
+                                        let t = std::time::Instant::now();
                                         state.apply_list_colors();
-                                        state.schedule_search_refresh();
+                                        log_slow("search.apply_list_colors", t);
+                                        let t = std::time::Instant::now();
+                                        state.schedule_search_refresh(root_count, indexing);
+                                        log_slow("search.schedule_refresh", t);
+                                        let t = std::time::Instant::now();
                                         state.update_status_bar();
+                                        log_slow("search.update_status", t);
                                     }
                                     Err(err) => {
                                         state.search.fail(err.user_message.clone());
@@ -3246,6 +3309,15 @@ unsafe extern "system" fn wnd_proc_inner(
                                         state.update_status_bar();
                                     }
                                 }
+                            }
+                            // A debounce/refresh tick arrived while this query was
+                            // running; start the latest one now instead of queueing.
+                            if state.search.rerun
+                                && state.search.active
+                                && !state.search.query.is_empty()
+                            {
+                                state.search.rerun = false;
+                                state.run_search();
                             }
                         }
                     }
@@ -3564,11 +3636,34 @@ pub fn create_main_window(
     unsafe {
         let mut wc = WNDCLASSEXW::default();
         if GetClassInfoExW(hinstance, CLASS_NAME, &mut wc).is_err() {
+            let icon_big = LoadImageW(
+                hinstance,
+                w!("#1"),
+                IMAGE_ICON,
+                GetSystemMetrics(SM_CXICON),
+                GetSystemMetrics(SM_CYICON),
+                LR_DEFAULTCOLOR | LR_SHARED,
+            )
+            .map(|h| HICON(h.0))
+            .unwrap_or_default();
+            let icon_small = LoadImageW(
+                hinstance,
+                w!("#1"),
+                IMAGE_ICON,
+                GetSystemMetrics(SM_CXSMICON),
+                GetSystemMetrics(SM_CYSMICON),
+                LR_DEFAULTCOLOR | LR_SHARED,
+            )
+            .map(|h| HICON(h.0))
+            .unwrap_or_default();
+
             wc.cbSize = std::mem::size_of::<WNDCLASSEXW>() as u32;
             wc.lpfnWndProc = Some(wnd_proc);
             wc.hInstance = hinstance;
             wc.lpszClassName = CLASS_NAME;
             wc.hCursor = LoadCursorW(None, IDC_ARROW)?;
+            wc.hIcon = icon_big;
+            wc.hIconSm = icon_small;
             wc.hbrBackground = HBRUSH((COLOR_WINDOW.0 + 1) as isize as *mut _);
             RegisterClassExW(&wc);
         }
@@ -3643,16 +3738,51 @@ pub fn create_main_window(
         state.dpi = if dpi > 0 { dpi } else { 96 };
         state.dispatcher.set_hwnd(hwnd);
 
+        let big_px = (32 * state.dpi as i32) / 96;
+        let small_px = (16 * state.dpi as i32) / 96;
+        if let Ok(hbig) = LoadImageW(
+            hinstance,
+            w!("#1"),
+            IMAGE_ICON,
+            big_px,
+            big_px,
+            LR_DEFAULTCOLOR | LR_SHARED,
+        ) {
+            let _ = SendMessageW(
+                hwnd,
+                WM_SETICON,
+                WPARAM(ICON_BIG as usize),
+                LPARAM(hbig.0 as isize),
+            );
+        }
+        if let Ok(hsmall) = LoadImageW(
+            hinstance,
+            w!("#1"),
+            IMAGE_ICON,
+            small_px,
+            small_px,
+            LR_DEFAULTCOLOR | LR_SHARED,
+        ) {
+            let _ = SendMessageW(
+                hwnd,
+                WM_SETICON,
+                WPARAM(ICON_SMALL as usize),
+                LPARAM(hsmall.0 as isize),
+            );
+        }
         state.rebuild_font();
         state.layout_children();
         state.apply_theme();
 
         // Start watcher notification forwarding
-        let mut notif_rx = state.app_state.watch_service.subscribe_notifications();
+        let watch_svc = state.app_state.watch_service.clone();
+        let mut notif_rx = watch_svc.subscribe_notifications();
         let disp = state.dispatcher.clone();
         state.runtime_handle.spawn(async move {
             while let Ok(notif) = notif_rx.recv().await {
-                disp.enqueue(UiEvent::WatchNotification(notif));
+                if notif.is_overflow || watch_svc.has_ui_subscriber(&notif.dir_path) {
+                    disp.enqueue(UiEvent::WatchNotification(notif));
+                }
             }
         });
 

@@ -93,7 +93,8 @@ fn main() {
     let index_svc = app_state.index_service.clone();
     let watch_svc = app_state.watch_service.clone();
     rt.spawn(async move {
-        explorer_app::lifecycle::restore_indexed_roots(index_svc, watch_svc).await;
+        explorer_app::lifecycle::restore_indexed_roots(index_svc.clone(), watch_svc.clone()).await;
+        explorer_app::lifecycle::run_index_watch_reconciler(index_svc, watch_svc).await;
     });
 
     // Bootstrap initial path

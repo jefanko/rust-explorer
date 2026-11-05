@@ -1,5 +1,7 @@
 use explorer_index::{SearchResponse, SearchResultItem};
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
 pub const RESULT_LIMIT: usize = 1000;
 pub const DEBOUNCE_MS: u32 = 150;
@@ -16,6 +18,11 @@ pub struct SearchView {
     pub indexing: bool,
     pub error: Option<String>,
     pub generation: u64,
+    /// True while an indexed query is executing on the blocking pool. The worker
+    /// clears it before dispatching, so a dropped completion cannot stall search.
+    pub in_flight: Arc<AtomicBool>,
+    /// A newer query was requested while `in_flight`; run it on completion.
+    pub rerun: bool,
     pub auto_indexed_path: Option<PathBuf>,
     pub auto_index_pending: bool,
     pub auto_index_attempts: u8,
@@ -33,6 +40,7 @@ impl SearchView {
         self.results.clear();
         self.total_matches = 0;
         self.is_capped = false;
+        self.rerun = false;
         self.generation
     }
 
@@ -41,8 +49,8 @@ impl SearchView {
         self.results = response.results;
         self.total_matches = response.total_matches;
         self.is_capped = response.is_capped;
+        self.indexing = response.indexing;
         self.pending = false;
-        self.error = None;
     }
 
     pub fn fail(&mut self, message: impl Into<String>) {
@@ -63,6 +71,7 @@ impl SearchView {
         self.pending = false;
         self.indexing = false;
         self.error = None;
+        self.rerun = false;
         self.auto_indexed_path = None;
         self.auto_index_pending = false;
         self.auto_index_attempts = 0;
@@ -110,6 +119,8 @@ mod tests {
             is_capped: capped,
             page: 1,
             page_size: RESULT_LIMIT,
+            root_count: 1,
+            indexing: false,
         }
     }
 

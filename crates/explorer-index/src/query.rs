@@ -1,9 +1,10 @@
-use crate::db::{IndexDb, bytes_to_wide};
+use crate::db::{IndexDb, bytes_to_wide, path_prefix_range_bytes};
 use explorer_domain::errors::{ErrorCode, ExplorerError};
 use explorer_win::path::wide_to_path;
 use rusqlite::params_from_iter;
 use serde::{Deserialize, Serialize};
 use std::os::windows::ffi::OsStrExt;
+use std::path::Path;
 use std::sync::Arc;
 use tracing::debug;
 
@@ -41,6 +42,8 @@ pub struct SearchResponse {
     pub is_capped: bool,
     pub page: usize,
     pub page_size: usize,
+    pub root_count: usize,
+    pub indexing: bool,
 }
 
 /// Parses a user search string according to Section 14.2 MVP query language rules.
@@ -224,6 +227,7 @@ fn process_token(
 pub struct QueryEngine {
     db: Arc<IndexDb>,
 }
+type PrefixRange = (Vec<u8>, Vec<u8>);
 
 impl QueryEngine {
     pub fn new(db: Arc<IndexDb>) -> Self {
@@ -238,6 +242,19 @@ impl QueryEngine {
         page: usize,
         page_size: usize,
     ) -> Result<SearchResponse, ExplorerError> {
+        self.execute_search_scoped(query_str, root_id, None, page, page_size)
+    }
+
+    /// Execute an indexed search, optionally restricted to a recursive folder subtree
+    /// when `scope_folder` falls inside an indexed root.
+    pub fn execute_search_scoped(
+        &self,
+        query_str: &str,
+        root_id: Option<&str>,
+        scope_folder: Option<&Path>,
+        page: usize,
+        page_size: usize,
+    ) -> Result<SearchResponse, ExplorerError> {
         let parsed = parse_query(query_str)?;
         let page_size = if page_size == 0 {
             DEFAULT_PAGE_SIZE
@@ -246,7 +263,6 @@ impl QueryEngine {
         };
         let page = if page == 0 { 1 } else { page };
 
-        // Determine if we should use FTS match or metadata-only query
         let fts_terms: Vec<String> = parsed
             .phrase_terms
             .iter()
@@ -260,107 +276,6 @@ impl QueryEngine {
             )
             .collect();
 
-        let use_fts = !fts_terms.is_empty();
-
-        let mut sql = String::new();
-        let mut params_vec: Vec<rusqlite::types::Value> = Vec::new();
-
-        if use_fts {
-            let fts_expr = fts_terms.join(" AND ");
-            sql.push_str(
-                "SELECT e.id, e.root_id, e.path_utf16le, e.name_display, e.name_norm, e.extension_norm, e.kind, e.size_bytes, e.modified_filetime
-                 FROM filename_fts f
-                 JOIN entries e ON e.id = f.rowid
-                 WHERE filename_fts MATCH ? ",
-            );
-            params_vec.push(rusqlite::types::Value::Text(fts_expr));
-        } else {
-            sql.push_str(
-                "SELECT e.id, e.root_id, e.path_utf16le, e.name_display, e.name_norm, e.extension_norm, e.kind, e.size_bytes, e.modified_filetime
-                 FROM entries e
-                 WHERE 1=1 ",
-            );
-        }
-
-        if let Some(rid) = root_id {
-            sql.push_str("AND e.root_id = ? ");
-            params_vec.push(rusqlite::types::Value::Text(rid.to_string()));
-        }
-
-        if let Some(kind) = parsed.kind_filter {
-            sql.push_str("AND e.kind = ? ");
-            params_vec.push(rusqlite::types::Value::Integer(kind as i64));
-        }
-
-        if let Some(ref ext) = parsed.extension_filter {
-            let dot_ext = format!(".{ext}");
-            sql.push_str("AND (e.extension_norm = ? OR e.name_norm = ?) ");
-            params_vec.push(rusqlite::types::Value::Text(ext.clone()));
-            params_vec.push(rusqlite::types::Value::Text(dot_ext));
-        }
-
-        // Apply short terms (< 3 chars) as instr predicates
-        for short_term in parsed.text_terms.iter().filter(|t| t.chars().count() < 3) {
-            sql.push_str("AND instr(e.name_norm, ?) > 0 ");
-            params_vec.push(rusqlite::types::Value::Text(short_term.clone()));
-        }
-
-        // Bounded fetch: max 1000 items
-        sql.push_str("LIMIT 1000");
-
-        debug!("Executing index search SQL: {}", sql);
-
-        let conn = self.db.raw_conn();
-        let guard = conn.lock().unwrap();
-        let mut stmt = guard.prepare(&sql).map_err(|e| {
-            ExplorerError::new(
-                ErrorCode::Internal,
-                format!("Failed to prepare search query: {e}"),
-                "QueryEngine::execute_search",
-            )
-        })?;
-
-        let rows = stmt
-            .query_map(params_from_iter(params_vec), |row| {
-                let id: i64 = row.get(0)?;
-                let root_id_col: String = row.get(1)?;
-                let path_bytes: Vec<u8> = row.get(2)?;
-                let name_display: String = row.get(3)?;
-                let name_norm: String = row.get(4)?;
-                let extension: String = row.get(5)?;
-                let kind_int: i32 = row.get(6)?;
-                let size_bytes: Option<i64> = row.get(7)?;
-                let modified_filetime: Option<i64> = row.get(8)?;
-
-                let path_buf = wide_to_path(&bytes_to_wide(&path_bytes));
-                let kind_str = match kind_int {
-                    1 => "directory",
-                    2 => "reparse_point",
-                    _ => "file",
-                };
-
-                Ok((
-                    id,
-                    root_id_col,
-                    path_buf.to_string_lossy().to_string(),
-                    path_buf.as_os_str().encode_wide().collect::<Vec<_>>(),
-                    name_display,
-                    name_norm,
-                    extension,
-                    kind_str.to_string(),
-                    size_bytes.map(|s| s as u64),
-                    modified_filetime.map(|m| m as u64),
-                ))
-            })
-            .map_err(|e| {
-                ExplorerError::new(
-                    ErrorCode::Internal,
-                    format!("Search query execution failed: {e}"),
-                    "QueryEngine::execute_search",
-                )
-            })?;
-
-        // Primary search term for ranking
         let primary_term = parsed
             .text_terms
             .first()
@@ -368,33 +283,85 @@ impl QueryEngine {
             .cloned()
             .unwrap_or_default();
 
-        let mut ranked = Vec::new();
-        for (id, rid, path, path_utf16, name, name_norm, ext, kind, size, mtime) in rows.flatten() {
-            let score = if !primary_term.is_empty() && name_norm == primary_term {
-                1 // Exact match
-            } else if !primary_term.is_empty() && name_norm.starts_with(&primary_term) {
-                2 // Prefix match
-            } else {
-                3 // Substring match
-            };
+        let resolved_scope: Option<(String, Option<PrefixRange>)> =
+            scope_folder.and_then(|folder| self.resolve_folder_scope(folder, root_id));
+        let effective_root = resolved_scope
+            .as_ref()
+            .map(|(rid, _)| rid.as_str())
+            .or(root_id);
+        let prefix_range = resolved_scope
+            .as_ref()
+            .and_then(|(_, range)| range.as_ref());
 
-            ranked.push((
-                score,
-                SearchResultItem {
-                    id,
-                    root_id: rid,
-                    path,
-                    path_utf16,
-                    display_name: name,
-                    extension: ext,
-                    kind,
-                    size_bytes: size,
-                    modified_filetime: mtime,
-                },
-            ));
-        }
+        let (ranked, root_count, indexing) =
+            self.db.read("QueryEngine::execute_search", |conn| {
+                let (root_count, indexing) = conn
+                    .query_row(
+                        "SELECT count(*), COALESCE(SUM(state IN ('scanning', 'not_indexed')), 0) FROM roots",
+                        [],
+                        |row| {
+                            let total: i64 = row.get(0)?;
+                            let active: i64 = row.get(1)?;
+                            Ok((total.max(0) as usize, active > 0))
+                        },
+                    )
+                    .map_err(|e| {
+                        ExplorerError::new(
+                            ErrorCode::Internal,
+                            format!("Failed to read root status: {e}"),
+                            "QueryEngine::execute_search",
+                        )
+                    })?;
 
-        // Rank by score ascending, then display name, then id
+                let mut ranked: Vec<(u8, SearchResultItem)> = Vec::new();
+
+                if !primary_term.is_empty() {
+                    // Tier 1 (exact match) and Tier 2 (prefix match) use the B-tree index on
+                    // `entries(name_norm)` directly so exact/prefix hits are never pushed past
+                    // `MAX_SEARCH_RESULTS` by thousands of arbitrary FTS substring matches.
+                    Self::collect_name_tier(
+                        conn,
+                        &parsed,
+                        effective_root,
+                        prefix_range,
+                        &primary_term,
+                        true,
+                        MAX_SEARCH_RESULTS,
+                        &mut ranked,
+                    )?;
+                    let rem = MAX_SEARCH_RESULTS.saturating_sub(ranked.len());
+                    if rem > 0 {
+                        Self::collect_name_tier(
+                            conn,
+                            &parsed,
+                            effective_root,
+                            prefix_range,
+                            &primary_term,
+                            false,
+                            rem,
+                            &mut ranked,
+                        )?;
+                    }
+                }
+
+                let rem = MAX_SEARCH_RESULTS.saturating_sub(ranked.len());
+                if rem > 0 {
+                    Self::collect_general_tier(
+                        conn,
+                        &parsed,
+                        &fts_terms,
+                        effective_root,
+                        prefix_range,
+                        &primary_term,
+                        rem,
+                        &mut ranked,
+                    )?;
+                }
+
+                Ok((ranked, root_count, indexing))
+            })?;
+
+        let mut ranked = ranked;
         ranked.sort_by(|a, b| {
             a.0.cmp(&b.0)
                 .then_with(|| a.1.display_name.cmp(&b.1.display_name))
@@ -404,7 +371,6 @@ impl QueryEngine {
         let total_matches = ranked.len();
         let is_capped = total_matches >= MAX_SEARCH_RESULTS;
 
-        // Keyset/offset paging
         let offset = (page.saturating_sub(1)) * page_size;
         let paged_results: Vec<SearchResultItem> = ranked
             .into_iter()
@@ -420,7 +386,219 @@ impl QueryEngine {
             is_capped,
             page,
             page_size,
+            root_count,
+            indexing,
         })
+    }
+
+    fn resolve_folder_scope(
+        &self,
+        scope_folder: &Path,
+        explicit_root_id: Option<&str>,
+    ) -> Option<(String, Option<PrefixRange>)> {
+        let roots = self.db.list_roots().ok()?;
+        let folder_stripped = explorer_win::path::strip_extended_prefix(scope_folder);
+        let folder_lc = folder_stripped.to_string_lossy().to_lowercase();
+        let folder_trim = folder_lc.trim_end_matches(['\\', '/']);
+
+        let matched = roots.into_iter().find(|r| {
+            if explicit_root_id.is_some_and(|id| id != r.id) {
+                return false;
+            }
+            let root_stripped = explorer_win::path::strip_extended_prefix(&r.path);
+            let root_lc = root_stripped.to_string_lossy().to_lowercase();
+            let root_trim = root_lc.trim_end_matches(['\\', '/']);
+            folder_trim == root_trim
+                || folder_trim
+                    .strip_prefix(root_trim)
+                    .is_some_and(|rest| rest.starts_with('\\') || rest.starts_with('/'))
+        })?;
+
+        let stored_dir = self.db.resolve_stored_dir(&matched.id, scope_folder)?;
+        if stored_dir == matched.path {
+            Some((matched.id, None))
+        } else {
+            Some((matched.id, Some(path_prefix_range_bytes(&stored_dir))))
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn collect_name_tier(
+        conn: &rusqlite::Connection,
+        parsed: &ParsedQuery,
+        root_id: Option<&str>,
+        prefix_range: Option<&PrefixRange>,
+        primary_term: &str,
+        exact: bool,
+        limit: usize,
+        out: &mut Vec<(u8, SearchResultItem)>,
+    ) -> Result<(), ExplorerError> {
+        let mut sql = String::from(
+            "SELECT e.id, e.root_id, e.path_utf16le, e.name_display, e.extension_norm, e.kind, e.size_bytes, e.modified_filetime
+             FROM entries e INDEXED BY entries_name_norm WHERE ",
+        );
+        let mut params_vec: Vec<rusqlite::types::Value> = Vec::new();
+
+        let score = if exact {
+            sql.push_str("e.name_norm = ? ");
+            params_vec.push(rusqlite::types::Value::Text(primary_term.to_string()));
+            1
+        } else {
+            let upper = format!("{primary_term}\u{10FFFF}");
+            sql.push_str("e.name_norm > ? AND e.name_norm < ? ");
+            params_vec.push(rusqlite::types::Value::Text(primary_term.to_string()));
+            params_vec.push(rusqlite::types::Value::Text(upper));
+            2
+        };
+
+        Self::append_common_filters(&mut sql, &mut params_vec, parsed, root_id, prefix_range);
+        for term in parsed
+            .text_terms
+            .iter()
+            .chain(parsed.phrase_terms.iter())
+            .filter(|t| t.as_str() != primary_term)
+        {
+            sql.push_str("AND instr(e.name_norm, ?) > 0 ");
+            params_vec.push(rusqlite::types::Value::Text(term.clone()));
+        }
+        sql.push_str("LIMIT ?");
+        params_vec.push(rusqlite::types::Value::Integer(limit as i64));
+
+        Self::run_row_query(conn, &sql, params_vec, score, out)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn collect_general_tier(
+        conn: &rusqlite::Connection,
+        parsed: &ParsedQuery,
+        fts_terms: &[String],
+        root_id: Option<&str>,
+        prefix_range: Option<&PrefixRange>,
+        primary_term: &str,
+        limit: usize,
+        out: &mut Vec<(u8, SearchResultItem)>,
+    ) -> Result<(), ExplorerError> {
+        let mut sql = String::new();
+        let mut params_vec: Vec<rusqlite::types::Value> = Vec::new();
+
+        if !fts_terms.is_empty() {
+            sql.push_str(
+                "SELECT e.id, e.root_id, e.path_utf16le, e.name_display, e.extension_norm, e.kind, e.size_bytes, e.modified_filetime
+                 FROM filename_fts f
+                 JOIN entries e ON e.id = f.rowid
+                 WHERE filename_fts MATCH ? ",
+            );
+            params_vec.push(rusqlite::types::Value::Text(fts_terms.join(" AND ")));
+        } else {
+            sql.push_str(
+                "SELECT e.id, e.root_id, e.path_utf16le, e.name_display, e.extension_norm, e.kind, e.size_bytes, e.modified_filetime
+                 FROM entries e
+                 WHERE 1=1 ",
+            );
+        }
+
+        if !primary_term.is_empty() {
+            let upper = format!("{primary_term}\u{10FFFF}");
+            sql.push_str("AND (e.name_norm < ? OR e.name_norm >= ?) ");
+            params_vec.push(rusqlite::types::Value::Text(primary_term.to_string()));
+            params_vec.push(rusqlite::types::Value::Text(upper));
+        }
+
+        Self::append_common_filters(&mut sql, &mut params_vec, parsed, root_id, prefix_range);
+        for short_term in parsed.text_terms.iter().filter(|t| t.chars().count() < 3) {
+            sql.push_str("AND instr(e.name_norm, ?) > 0 ");
+            params_vec.push(rusqlite::types::Value::Text(short_term.clone()));
+        }
+        sql.push_str("LIMIT ?");
+        params_vec.push(rusqlite::types::Value::Integer(limit as i64));
+
+        debug!("Executing index search SQL: {}", sql);
+        Self::run_row_query(conn, &sql, params_vec, 3, out)
+    }
+
+    fn append_common_filters(
+        sql: &mut String,
+        params_vec: &mut Vec<rusqlite::types::Value>,
+        parsed: &ParsedQuery,
+        root_id: Option<&str>,
+        prefix_range: Option<&PrefixRange>,
+    ) {
+        if let Some(rid) = root_id {
+            sql.push_str("AND e.root_id = ? ");
+            params_vec.push(rusqlite::types::Value::Text(rid.to_string()));
+        }
+        if let Some((lo, hi)) = prefix_range {
+            sql.push_str("AND e.path_utf16le >= ? AND e.path_utf16le < ? ");
+            params_vec.push(rusqlite::types::Value::Blob(lo.clone()));
+            params_vec.push(rusqlite::types::Value::Blob(hi.clone()));
+        }
+        if let Some(kind) = parsed.kind_filter {
+            sql.push_str("AND e.kind = ? ");
+            params_vec.push(rusqlite::types::Value::Integer(kind as i64));
+        }
+        if let Some(ext) = &parsed.extension_filter {
+            sql.push_str("AND e.extension_norm = ? ");
+            params_vec.push(rusqlite::types::Value::Text(ext.clone()));
+        }
+    }
+
+    fn run_row_query(
+        conn: &rusqlite::Connection,
+        sql: &str,
+        params_vec: Vec<rusqlite::types::Value>,
+        score: u8,
+        out: &mut Vec<(u8, SearchResultItem)>,
+    ) -> Result<(), ExplorerError> {
+        let mut stmt = conn.prepare(sql).map_err(|e| {
+            ExplorerError::new(
+                ErrorCode::Internal,
+                format!("Failed to prepare search query: {e}"),
+                "QueryEngine::execute_search",
+            )
+        })?;
+
+        let rows = stmt
+            .query_map(params_from_iter(params_vec), |row| {
+                let id: i64 = row.get(0)?;
+                let root_id: String = row.get(1)?;
+                let path_bytes: Vec<u8> = row.get(2)?;
+                let display_name: String = row.get(3)?;
+                let extension: String = row.get(4)?;
+                let kind_int: i32 = row.get(5)?;
+                let size_bytes: Option<i64> = row.get(6)?;
+                let modified_filetime: Option<i64> = row.get(7)?;
+
+                let path_buf = wide_to_path(&bytes_to_wide(&path_bytes));
+                let kind = match kind_int {
+                    1 => "directory",
+                    2 => "reparse_point",
+                    _ => "file",
+                };
+
+                Ok(SearchResultItem {
+                    id,
+                    root_id,
+                    path: path_buf.to_string_lossy().to_string(),
+                    path_utf16: path_buf.as_os_str().encode_wide().collect(),
+                    display_name,
+                    extension,
+                    kind: kind.to_string(),
+                    size_bytes: size_bytes.map(|s| s as u64),
+                    modified_filetime: modified_filetime.map(|m| m as u64),
+                })
+            })
+            .map_err(|e| {
+                ExplorerError::new(
+                    ErrorCode::Internal,
+                    format!("Search query execution failed: {e}"),
+                    "QueryEngine::execute_search",
+                )
+            })?;
+
+        for item in rows.flatten() {
+            out.push((score, item));
+        }
+        Ok(())
     }
 }
 
@@ -606,5 +784,128 @@ mod tests {
         let res_wild = engine.execute_search("*explorer*", None, 1, 10).unwrap();
         assert_eq!(res_wild.total_matches, 1);
         assert_eq!(res_wild.results[0].display_name, "rust-explorer.exe");
+    }
+
+    #[test]
+    fn exact_and_prefix_matches_survive_when_substrings_exceed_result_cap() {
+        let db = Arc::new(IndexDb::open_in_memory().unwrap());
+        let root = db.add_root(&PathBuf::from(r"C:\test")).unwrap();
+
+        let mut entries: Vec<IndexEntryRecord> = (0..1100)
+            .map(|i| {
+                let name = format!("aa_{i:04}_readme_notes.txt");
+                IndexEntryRecord {
+                    root_id: root.id.clone(),
+                    parent_id: None,
+                    path: PathBuf::from(format!(r"C:\test\{name}")),
+                    name_display: name.clone(),
+                    name_norm: name,
+                    extension_norm: "txt".to_string(),
+                    kind: 0,
+                    size_bytes: Some(10),
+                    modified_filetime: Some(1),
+                    attributes: 32,
+                    seen_epoch: 1,
+                }
+            })
+            .collect();
+        for name in ["readme", "readme.md"] {
+            entries.push(IndexEntryRecord {
+                root_id: root.id.clone(),
+                parent_id: None,
+                path: PathBuf::from(format!(r"C:\test\{name}")),
+                name_display: name.to_string(),
+                name_norm: name.to_string(),
+                extension_norm: String::new(),
+                kind: 0,
+                size_bytes: Some(10),
+                modified_filetime: Some(1),
+                attributes: 32,
+                seen_epoch: 1,
+            });
+        }
+        db.batch_upsert_entries(&entries).unwrap();
+
+        let engine = QueryEngine::new(db);
+        let res = engine.execute_search("readme", None, 1, 10).unwrap();
+        assert!(res.is_capped);
+        assert_eq!(res.results[0].display_name, "readme");
+        assert_eq!(res.results[1].display_name, "readme.md");
+    }
+
+    #[test]
+    fn scoped_folder_search_returns_recursive_descendants_case_insensitively() {
+        let db = Arc::new(IndexDb::open_in_memory().unwrap());
+        let root = db.add_root(&PathBuf::from(r"\\?\D:\")).unwrap();
+
+        let entries = vec![
+            IndexEntryRecord {
+                root_id: root.id.clone(),
+                parent_id: None,
+                path: PathBuf::from(r"\\?\D:\Dev"),
+                name_display: "Dev".to_string(),
+                name_norm: "dev".to_string(),
+                extension_norm: String::new(),
+                kind: 1,
+                size_bytes: None,
+                modified_filetime: Some(1),
+                attributes: 16,
+                seen_epoch: 1,
+            },
+            IndexEntryRecord {
+                root_id: root.id.clone(),
+                parent_id: None,
+                path: PathBuf::from(r"\\?\D:\Dev\ProjectA"),
+                name_display: "ProjectA".to_string(),
+                name_norm: "projecta".to_string(),
+                extension_norm: String::new(),
+                kind: 1,
+                size_bytes: None,
+                modified_filetime: Some(1),
+                attributes: 16,
+                seen_epoch: 1,
+            },
+            IndexEntryRecord {
+                root_id: root.id.clone(),
+                parent_id: None,
+                path: PathBuf::from(r"\\?\D:\Dev\ProjectA\nested_target.rs"),
+                name_display: "nested_target.rs".to_string(),
+                name_norm: "nested_target.rs".to_string(),
+                extension_norm: "rs".to_string(),
+                kind: 0,
+                size_bytes: Some(42),
+                modified_filetime: Some(1),
+                attributes: 32,
+                seen_epoch: 1,
+            },
+            IndexEntryRecord {
+                root_id: root.id.clone(),
+                parent_id: None,
+                path: PathBuf::from(r"\\?\D:\Other\outside_target.rs"),
+                name_display: "outside_target.rs".to_string(),
+                name_norm: "outside_target.rs".to_string(),
+                extension_norm: "rs".to_string(),
+                kind: 0,
+                size_bytes: Some(42),
+                modified_filetime: Some(1),
+                attributes: 32,
+                seen_epoch: 1,
+            },
+        ];
+        db.batch_upsert_entries(&entries).unwrap();
+
+        let engine = QueryEngine::new(db);
+        // Scope using lowercase unprefixed path `d:\dev` while entries are stored under `\\?\D:\Dev`
+        let scoped = engine
+            .execute_search_scoped("target", None, Some(Path::new(r"d:\dev")), 1, 10)
+            .unwrap();
+        assert_eq!(scoped.total_matches, 1);
+        assert_eq!(scoped.results[0].display_name, "nested_target.rs");
+
+        // Outside any indexed root -> falls back to global search across all roots
+        let fallback = engine
+            .execute_search_scoped("target", None, Some(Path::new(r"C:\Unindexed")), 1, 10)
+            .unwrap();
+        assert_eq!(fallback.total_matches, 2);
     }
 }

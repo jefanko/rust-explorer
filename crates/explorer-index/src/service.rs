@@ -110,7 +110,45 @@ impl IndexService {
         Ok(())
     }
 
-    /// Execute search query.
+    /// Incrementally reconciles changed paths inside an indexed root without re-crawling
+    /// the entire volume. Each changed path's parent directory (plus any changed directory
+    /// itself) is re-enumerated and scoped-pruned.
+    pub fn reconcile_paths(
+        &self,
+        root_id: &str,
+        changed_paths: &[std::path::PathBuf],
+    ) -> Result<(), ExplorerError> {
+        let mut dirs: Vec<std::path::PathBuf> = Vec::new();
+        for p in changed_paths {
+            let candidate = if p.is_dir() {
+                Some(p.as_path())
+            } else {
+                p.parent()
+            };
+            if let Some(dir) = candidate
+                && let Some(stored) = self.db.resolve_stored_dir(root_id, dir)
+                && !dirs.contains(&stored)
+            {
+                dirs.push(stored);
+            }
+            // If a changed path itself was a directory that was just deleted or renamed,
+            // also reconcile its parent so the directory entry and its orphaned subtree
+            // are pruned.
+            if let Some(parent) = p.parent()
+                && let Some(stored_parent) = self.db.resolve_stored_dir(root_id, parent)
+                && !dirs.contains(&stored_parent)
+            {
+                dirs.push(stored_parent);
+            }
+        }
+
+        for dir in dirs {
+            let _ = self.crawler.reconcile_directory(root_id, &dir, true)?;
+        }
+        Ok(())
+    }
+
+    /// Execute search query, optionally restricted to a recursive folder subtree.
     pub fn search(
         &self,
         query: &str,
@@ -118,8 +156,20 @@ impl IndexService {
         page: usize,
         page_size: usize,
     ) -> Result<SearchResponse, ExplorerError> {
+        self.search_in_folder(query, root_id, None, page, page_size)
+    }
+
+    /// Execute search query with an optional recursive folder scope.
+    pub fn search_in_folder(
+        &self,
+        query: &str,
+        root_id: Option<&str>,
+        scope_folder: Option<&Path>,
+        page: usize,
+        page_size: usize,
+    ) -> Result<SearchResponse, ExplorerError> {
         self.query_engine
-            .execute_search(query, root_id, page, page_size)
+            .execute_search_scoped(query, root_id, scope_folder, page, page_size)
     }
 
     /// Trigger a background metadata crawl on a dedicated OS thread.
@@ -205,5 +255,57 @@ mod tests {
         service.remove_root(&root.id).unwrap();
         let roots = service.list_roots().unwrap();
         assert!(roots.is_empty());
+    }
+
+    #[test]
+    fn reconcile_paths_updates_index_for_created_and_deleted_files() {
+        let temp = tempdir().unwrap();
+        fs::write(
+            temp.path().join(".rust-explorer-fixture-root"),
+            "index fixture",
+        )
+        .unwrap();
+        let root_dir = temp.path().join("data");
+        let sub = root_dir.join("sub");
+        fs::create_dir_all(&sub).unwrap();
+        let first = sub.join("alpha_report.txt");
+        fs::write(&first, "1").unwrap();
+
+        let service = IndexService::new_in_memory().unwrap();
+        let root = service.add_root(&root_dir).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(250));
+
+        assert_eq!(
+            service
+                .search("alpha_report", None, 1, 10)
+                .unwrap()
+                .total_matches,
+            1
+        );
+
+        // Create a new file and delete the old one, then incrementally reconcile only `sub`.
+        let second = sub.join("beta_invoice.txt");
+        fs::write(&second, "2").unwrap();
+        fs::remove_file(&first).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+
+        service
+            .reconcile_paths(&root.id, std::slice::from_ref(&second))
+            .unwrap();
+
+        assert_eq!(
+            service
+                .search("beta_invoice", None, 1, 10)
+                .unwrap()
+                .total_matches,
+            1
+        );
+        assert_eq!(
+            service
+                .search("alpha_report", None, 1, 10)
+                .unwrap()
+                .total_matches,
+            0
+        );
     }
 }

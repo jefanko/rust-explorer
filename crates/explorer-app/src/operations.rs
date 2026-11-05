@@ -655,6 +655,19 @@ pub fn search_indexed(
     state.index_service.search(query, root_id, page, page_size)
 }
 
+pub fn search_indexed_in_folder(
+    state: &AppState,
+    query: &str,
+    root_id: Option<&str>,
+    scope_folder: Option<&Path>,
+    page: usize,
+    page_size: usize,
+) -> Result<explorer_index::SearchResponse, ExplorerError> {
+    state
+        .index_service
+        .search_in_folder(query, root_id, scope_folder, page, page_size)
+}
+
 pub async fn open_path(
     state: &AppState,
     path_utf16: &[u16],

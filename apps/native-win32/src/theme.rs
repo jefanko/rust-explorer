@@ -42,6 +42,17 @@ pub const DARK_BORDER: u32 = 0x002D_2D2D;
 /// Accent color, kept for selection and focus work.
 pub const DARK_ACCENT: u32 = 0x00FF_CD60;
 
+/// Light-mode colors are explicit so an app-level Light preference stays light
+/// even when Windows itself is configured for dark mode.
+pub const LIGHT_BG: u32 = 0x00FF_FFFF;
+pub const LIGHT_PANEL: u32 = 0x00F3_F3F3;
+pub const LIGHT_SURFACE: u32 = 0x00FA_FAFA;
+pub const LIGHT_INPUT: u32 = 0x00FF_FFFF;
+pub const LIGHT_TEXT: u32 = 0x0020_2020;
+pub const LIGHT_TEXT_SECONDARY: u32 = 0x0060_6060;
+pub const LIGHT_TEXT_MUTED: u32 = 0x0080_8080;
+pub const LIGHT_BORDER: u32 = 0x00D6_D6D6;
+
 const DWMWA_COLOR_DEFAULT: u32 = 0xFFFF_FFFF;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -116,6 +127,10 @@ pub struct ThemeState {
     surface: SafeBrush,
     input: SafeBrush,
     accent: SafeBrush,
+    light_background: SafeBrush,
+    light_panel: SafeBrush,
+    light_surface: SafeBrush,
+    light_input: SafeBrush,
 }
 
 impl ThemeState {
@@ -131,6 +146,10 @@ impl ThemeState {
             surface: solid_brush(DARK_SURFACE),
             input: solid_brush(DARK_INPUT),
             accent: solid_brush(DARK_ACCENT),
+            light_background: solid_brush(LIGHT_BG),
+            light_panel: solid_brush(LIGHT_PANEL),
+            light_surface: solid_brush(LIGHT_SURFACE),
+            light_input: solid_brush(LIGHT_INPUT),
         };
         if !high_contrast {
             set_preferred_app_mode(state.app_mode());
@@ -165,28 +184,107 @@ impl ThemeState {
     }
 
     pub fn background_brush(&self) -> HBRUSH {
-        self.background.handle()
+        if self.high_contrast {
+            unsafe { GetSysColorBrush(COLOR_WINDOW) }
+        } else if self.dark {
+            self.background.handle()
+        } else {
+            self.light_background.handle()
+        }
     }
 
     pub fn panel_brush(&self) -> HBRUSH {
-        self.panel.handle()
+        if self.high_contrast {
+            unsafe { GetSysColorBrush(COLOR_BTNFACE) }
+        } else if self.dark {
+            self.panel.handle()
+        } else {
+            self.light_panel.handle()
+        }
     }
 
     pub fn surface_brush(&self) -> HBRUSH {
-        self.surface.handle()
+        if self.high_contrast {
+            unsafe { GetSysColorBrush(COLOR_BTNFACE) }
+        } else if self.dark {
+            self.surface.handle()
+        } else {
+            self.light_surface.handle()
+        }
     }
 
     pub fn input_brush(&self) -> HBRUSH {
-        self.input.handle()
+        if self.high_contrast {
+            unsafe { GetSysColorBrush(COLOR_WINDOW) }
+        } else if self.dark {
+            self.input.handle()
+        } else {
+            self.light_input.handle()
+        }
     }
 
     pub fn accent_brush(&self) -> HBRUSH {
-        self.accent.handle()
+        if self.high_contrast {
+            unsafe { GetSysColorBrush(windows::Win32::Graphics::Gdi::COLOR_HIGHLIGHT) }
+        } else {
+            self.accent.handle()
+        }
+    }
+
+    pub fn background_color(&self) -> COLORREF {
+        if self.high_contrast {
+            COLORREF(unsafe { GetSysColor(COLOR_WINDOW) })
+        } else if self.dark {
+            COLORREF(DARK_BG)
+        } else {
+            COLORREF(LIGHT_BG)
+        }
+    }
+
+    pub fn panel_color(&self) -> COLORREF {
+        if self.high_contrast {
+            COLORREF(unsafe { GetSysColor(COLOR_BTNFACE) })
+        } else if self.dark {
+            COLORREF(DARK_PANEL)
+        } else {
+            COLORREF(LIGHT_PANEL)
+        }
+    }
+
+    pub fn input_color(&self) -> COLORREF {
+        if self.high_contrast {
+            COLORREF(unsafe { GetSysColor(COLOR_WINDOW) })
+        } else if self.dark {
+            COLORREF(DARK_INPUT)
+        } else {
+            COLORREF(LIGHT_INPUT)
+        }
+    }
+
+    pub fn primary_text_color(&self) -> COLORREF {
+        if self.high_contrast {
+            COLORREF(unsafe { GetSysColor(COLOR_WINDOWTEXT) })
+        } else if self.dark {
+            COLORREF(DARK_TEXT)
+        } else {
+            COLORREF(LIGHT_TEXT)
+        }
+    }
+
+    pub fn secondary_text_color(&self) -> COLORREF {
+        if self.high_contrast {
+            COLORREF(unsafe { GetSysColor(COLOR_GRAYTEXT) })
+        } else if self.dark {
+            COLORREF(DARK_TEXT_SECONDARY)
+        } else {
+            COLORREF(LIGHT_TEXT_SECONDARY)
+        }
     }
 }
 
 pub struct DialogPalette {
     pub dark: bool,
+    high_contrast: bool,
     surface: Option<SafeBrush>,
     input: Option<SafeBrush>,
     surface_color: COLORREF,
@@ -194,23 +292,34 @@ pub struct DialogPalette {
 }
 
 impl DialogPalette {
-    pub fn new(dark: bool) -> Self {
-        if dark {
-            Self {
-                dark,
-                surface: Some(solid_brush(DARK_SURFACE)),
-                input: Some(solid_brush(DARK_INPUT)),
-                surface_color: COLORREF(DARK_SURFACE),
-                input_color: COLORREF(DARK_INPUT),
+    pub fn new(dark: bool, high_contrast: bool) -> Self {
+        let (surface_color, input_color) = if high_contrast {
+            unsafe {
+                (
+                    COLORREF(GetSysColor(COLOR_BTNFACE)),
+                    COLORREF(GetSysColor(COLOR_WINDOW)),
+                )
             }
+        } else if dark {
+            (COLORREF(DARK_SURFACE), COLORREF(DARK_INPUT))
         } else {
-            Self {
-                dark,
-                surface: None,
-                input: None,
-                surface_color: COLORREF(unsafe { GetSysColor(COLOR_BTNFACE) }),
-                input_color: COLORREF(unsafe { GetSysColor(COLOR_WINDOW) }),
-            }
+            (COLORREF(LIGHT_SURFACE), COLORREF(LIGHT_INPUT))
+        };
+        let (surface, input) = if high_contrast {
+            (None, None)
+        } else {
+            (
+                Some(solid_brush(surface_color.0)),
+                Some(solid_brush(input_color.0)),
+            )
+        };
+        Self {
+            dark,
+            high_contrast,
+            surface,
+            input,
+            surface_color,
+            input_color,
         }
     }
 
@@ -237,18 +346,22 @@ impl DialogPalette {
     }
 
     pub fn text_color(&self) -> COLORREF {
-        if self.dark {
+        if self.high_contrast {
+            COLORREF(unsafe { GetSysColor(COLOR_WINDOWTEXT) })
+        } else if self.dark {
             COLORREF(DARK_TEXT)
         } else {
-            COLORREF(unsafe { GetSysColor(COLOR_WINDOWTEXT) })
+            COLORREF(LIGHT_TEXT)
         }
     }
 
     pub fn secondary_color(&self) -> COLORREF {
-        if self.dark {
+        if self.high_contrast {
+            COLORREF(unsafe { GetSysColor(COLOR_GRAYTEXT) })
+        } else if self.dark {
             COLORREF(DARK_TEXT_SECONDARY)
         } else {
-            COLORREF(unsafe { GetSysColor(COLOR_GRAYTEXT) })
+            COLORREF(LIGHT_TEXT_SECONDARY)
         }
     }
 }
@@ -424,7 +537,8 @@ pub fn apply_control_theme(hwnd: HWND, dark: bool, control: ThemeControl) {
         (false, ThemeControl::Edit) => w!("Explorer"),
         (true, ThemeControl::Tab | ThemeControl::Status) => w!(""),
         (false, ThemeControl::Tab | ThemeControl::Status) => w!("Explorer"),
-        (_, ThemeControl::Button | ThemeControl::Tree) => w!("Explorer"),
+        (true, ThemeControl::Button | ThemeControl::Tree) => w!("DarkMode_Explorer"),
+        (false, ThemeControl::Button | ThemeControl::Tree) => w!("Explorer"),
     };
     let _ = unsafe { SetWindowTheme(hwnd, name, PCWSTR::null()) };
     allow_dark_mode_for_window(hwnd, dark);

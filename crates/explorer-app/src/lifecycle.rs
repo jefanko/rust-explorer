@@ -1,9 +1,9 @@
 use crate::state::AppState;
 use explorer_index::{IndexService, IndexedRoot, RootState};
-use explorer_watch::WatchMode;
+use explorer_watch::{WatchMode, WatchNotification};
 use explorer_win::instance::InstanceLease;
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::task::JoinHandle;
@@ -113,14 +113,17 @@ pub async fn restore_indexed_roots(
             }
         }
 
-        // Refresh a stale completed index only after the UI has had time to settle.
-        const STALE_AFTER_SECS: u64 = 24 * 60 * 60;
-        let now = std::time::SystemTime::now()
+        // Refresh a stale completed index or a root flagged for reconciliation
+        // only after the UI has had time to settle. `completed_epoch` is stored
+        // in Unix milliseconds by `MetadataCrawler::crawl_root`.
+        const STALE_AFTER_MS: u64 = 24 * 60 * 60 * 1000;
+        let now_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
-            .as_secs();
-        if completed_epoch > 0
-            && now.saturating_sub(completed_epoch) > STALE_AFTER_SECS
+            .as_millis() as u64;
+        let stale_ready =
+            completed_epoch > 0 && now_ms.saturating_sub(completed_epoch) > STALE_AFTER_MS;
+        if (stale_ready || root_state == RootState::NeedsReconcile)
             && !matches!(root_state, RootState::Scanning | RootState::NotIndexed)
         {
             let index = index_service.clone();
@@ -137,11 +140,15 @@ pub async fn restore_indexed_roots(
     }
 }
 
-/// Debounced recrawl scheduler for an indexed root.
+/// Debounced incremental index reconciliation scheduler for an indexed root.
+/// When `overflow` is true, falls back to a full root recrawl; otherwise only the
+/// affected directories in `changed_paths` are re-enumerated and pruned.
 pub fn schedule_index_reconcile(
     index_service: Arc<IndexService>,
     pending: &mut HashMap<String, JoinHandle<()>>,
     root_id: String,
+    changed_paths: Vec<PathBuf>,
+    overflow: bool,
 ) {
     if let Some(previous) = pending.remove(&root_id) {
         previous.abort();
@@ -151,7 +158,15 @@ pub fn schedule_index_reconcile(
     let task = tokio::spawn(async move {
         tokio::time::sleep(Duration::from_millis(350)).await;
         let service = index_service.clone();
-        match tokio::task::spawn_blocking(move || service.recrawl_root(&root_id)).await {
+        let res = tokio::task::spawn_blocking(move || {
+            if overflow || changed_paths.is_empty() {
+                service.recrawl_root(&root_id)
+            } else {
+                service.reconcile_paths(&root_id, &changed_paths)
+            }
+        })
+        .await;
+        match res {
             Ok(Ok(())) => {}
             Ok(Err(error)) => {
                 tracing::warn!("Unable to reconcile indexed root after watch event: {error}")
@@ -160,4 +175,57 @@ pub fn schedule_index_reconcile(
         }
     });
     pending.insert(key, task);
+}
+
+/// Background loop consuming coalesced `WatchNotification` batches and keeping
+/// matching indexed roots up to date without waking the UI thread.
+pub async fn run_index_watch_reconciler(
+    index_service: Arc<IndexService>,
+    watch_service: Arc<explorer_watch::WatchService>,
+) {
+    let mut rx = watch_service.subscribe_notifications();
+    let mut pending: HashMap<String, JoinHandle<()>> = HashMap::new();
+
+    while let Ok(notif) = rx.recv().await {
+        dispatch_watch_to_index(&index_service, &mut pending, &notif).await;
+    }
+}
+
+async fn dispatch_watch_to_index(
+    index_service: &Arc<IndexService>,
+    pending: &mut HashMap<String, JoinHandle<()>>,
+    notif: &WatchNotification,
+) {
+    let roots = list_indexed_roots(index_service.clone()).await;
+    if roots.is_empty() {
+        return;
+    }
+
+    let notif_norm = normalize_compare_path(&notif.dir_path);
+    for root in roots {
+        let root_norm = normalize_compare_path(&root.path);
+        let matches_root = notif_norm == root_norm
+            || notif_norm
+                .strip_prefix(&root_norm)
+                .is_some_and(|rest| rest.starts_with('\\') || rest.starts_with('/'));
+        if !matches_root {
+            continue;
+        }
+
+        let changed_paths: Vec<PathBuf> = notif.changes.iter().map(|c| c.path.clone()).collect();
+        schedule_index_reconcile(
+            index_service.clone(),
+            pending,
+            root.id,
+            changed_paths,
+            notif.is_overflow,
+        );
+    }
+}
+
+fn normalize_compare_path(path: &Path) -> String {
+    explorer_win::path::strip_extended_prefix(path)
+        .to_string_lossy()
+        .trim_end_matches(['\\', '/'])
+        .to_lowercase()
 }

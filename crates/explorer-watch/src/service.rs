@@ -233,6 +233,18 @@ impl WatchService {
             .map(|s| s.subscribers.len())
             .unwrap_or(0)
     }
+
+    /// True when at least one non-index subscriber (e.g. an open tab) is subscribed
+    /// to `path`, so background indexed-root events need not wake the UI thread.
+    pub fn has_ui_subscriber(&self, path: &Path) -> bool {
+        let canonical = normalize_watch_path(path);
+        let subs = self.subscriptions.lock().unwrap();
+        subs.get(&canonical).is_some_and(|s| {
+            s.subscribers
+                .iter()
+                .any(|id| !id.starts_with("indexed-root:"))
+        })
+    }
 }
 
 /// Normalizes watch path, stripping trailing backslashes/slashes.

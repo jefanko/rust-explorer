@@ -1,4 +1,4 @@
-# Rust Explorer
+# <img src="assets/logo.png" width="36" height="36" align="top" alt="Rust Explorer logo" /> Rust Explorer
 
 A file manager for Windows, written in Rust against the Win32 API. No web view, no
 Electron, no Node at runtime: the shell is a plain `CreateWindowExW` window, the file

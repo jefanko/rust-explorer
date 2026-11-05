@@ -1,5 +1,5 @@
 use crate::db::{IndexDb, IndexEntryRecord, RootState};
-use explorer_domain::errors::ExplorerError;
+use explorer_domain::errors::{ErrorCode, ExplorerError};
 use explorer_domain::models::EntryKind;
 use explorer_win::enumerate::enumerate_directory;
 use std::collections::VecDeque;
@@ -81,9 +81,21 @@ impl MetadataCrawler {
             let entries = match enumerate_directory(&dir, None, true) {
                 Ok(entries) => entries,
                 Err(err) => {
-                    // Preserve old entries for directories whose contents were not enumerated.
-                    debug!("Skipping inaccessible folder {}: {err}", dir.display());
-                    partial_scan = true;
+                    match err.code {
+                        ErrorCode::AccessDenied if dir != root_path => {
+                            // Protected system folders inside a volume are permanently
+                            // inaccessible without elevation; do not fail the root scan.
+                            debug!("Skipping access-denied folder {}: {err}", dir.display());
+                        }
+                        ErrorCode::NotFound if dir != root_path => {
+                            // Transiently removed directory; prune any old children.
+                            completed_directories.push(dir);
+                        }
+                        _ => {
+                            debug!("Skipping inaccessible folder {}: {err}", dir.display());
+                            partial_scan = true;
+                        }
+                    }
                     continue;
                 }
             };
@@ -151,12 +163,9 @@ impl MetadataCrawler {
         }
 
         // Prune only direct children of directories whose enumeration completed.
-        let mut pruned = 0;
-        for completed_dir in &completed_directories {
-            pruned += self
-                .db
-                .prune_unseen_children(root_id, completed_dir, current_epoch)?;
-        }
+        let pruned = self
+            .db
+            .prune_unseen(root_id, &completed_directories, current_epoch)?;
         debug!("Pruned {pruned} missing entries from root {root_id}");
 
         // Keep root state truthful if the root itself was unavailable or any subtree failed.
@@ -175,6 +184,109 @@ impl MetadataCrawler {
             root_id, stats.files_indexed, stats.directories_indexed, stats.elapsed
         );
 
+        Ok(stats)
+    }
+
+    /// Incrementally reconciles a single directory and its immediate children
+    /// (plus any newly created subdirectories) without re-crawling the full root.
+    pub fn reconcile_directory(
+        &self,
+        root_id: &str,
+        dir_path: &Path,
+        recursive_subtrees: bool,
+    ) -> Result<CrawlStats, ExplorerError> {
+        let start_time = Instant::now();
+        let mut stats = CrawlStats::default();
+        let current_epoch = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as i64;
+
+        let state_dir_opt = std::env::var("LOCALAPPDATA")
+            .map(PathBuf::from)
+            .ok()
+            .map(|p| p.join("RustExplorer"));
+
+        let mut queue: VecDeque<PathBuf> = VecDeque::new();
+        queue.push_back(dir_path.to_path_buf());
+        let mut completed_directories = Vec::new();
+        let mut batch: Vec<IndexEntryRecord> = Vec::with_capacity(BATCH_SIZE);
+
+        while let Some(dir) = queue.pop_front() {
+            let entries = match enumerate_directory(&dir, None, true) {
+                Ok(entries) => entries,
+                Err(err) => {
+                    if err.code == ErrorCode::NotFound {
+                        completed_directories.push(dir);
+                    } else {
+                        debug!("Skipping inaccessible folder {}: {err}", dir.display());
+                    }
+                    continue;
+                }
+            };
+            completed_directories.push(dir.clone());
+
+            for entry in entries {
+                let native_name = std::ffi::OsString::from_wide(&entry.native_name_utf16);
+                let full_path = dir.join(native_name);
+
+                if is_excluded(&entry.display_name, &full_path, state_dir_opt.as_deref()) {
+                    stats.excluded_skipped += 1;
+                    continue;
+                }
+
+                let is_reparse = entry.kind == EntryKind::ReparsePoint;
+                let is_dir = entry.kind == EntryKind::Directory;
+                let kind_code = match entry.kind {
+                    EntryKind::File => 0,
+                    EntryKind::Directory => 1,
+                    EntryKind::ReparsePoint => 2,
+                };
+
+                batch.push(IndexEntryRecord {
+                    root_id: root_id.to_string(),
+                    parent_id: None,
+                    path: full_path.clone(),
+                    name_display: entry.display_name.clone(),
+                    name_norm: entry.display_name.to_lowercase(),
+                    extension_norm: entry.extension.to_lowercase(),
+                    kind: kind_code,
+                    size_bytes: entry.size_bytes,
+                    modified_filetime: entry.modified_filetime,
+                    attributes: entry.attributes,
+                    seen_epoch: current_epoch,
+                });
+
+                if is_reparse {
+                    stats.reparse_points_skipped += 1;
+                } else if is_dir {
+                    stats.directories_indexed += 1;
+                    if recursive_subtrees {
+                        queue.push_back(full_path);
+                    }
+                } else {
+                    stats.files_indexed += 1;
+                }
+
+                if batch.len() >= BATCH_SIZE {
+                    self.db.batch_upsert_entries(&batch)?;
+                    batch.clear();
+                }
+            }
+        }
+
+        if !batch.is_empty() {
+            self.db.batch_upsert_entries(&batch)?;
+        }
+
+        self.db.prune_unseen_scoped(
+            root_id,
+            Some(dir_path),
+            &completed_directories,
+            current_epoch,
+        )?;
+
+        stats.elapsed = start_time.elapsed();
         Ok(stats)
     }
 }
@@ -235,5 +347,61 @@ mod tests {
 
         let roots = db.list_roots().unwrap();
         assert_eq!(roots[0].state, RootState::Ready);
+    }
+
+    #[test]
+    fn recrawl_prunes_deleted_files_and_subtrees_in_single_pass() {
+        let temp = tempdir().unwrap();
+        fs::write(
+            temp.path().join(".rust-explorer-fixture-root"),
+            "index fixture",
+        )
+        .unwrap();
+        let root_dir = temp.path().join("data");
+        let sub = root_dir.join("sub");
+        let deep = sub.join("deep");
+        fs::create_dir_all(&deep).unwrap();
+        fs::write(root_dir.join("keep.txt"), "1").unwrap();
+        fs::write(root_dir.join("gone.txt"), "2").unwrap();
+        fs::write(deep.join("nested.txt"), "3").unwrap();
+
+        let db = Arc::new(IndexDb::open_in_memory().unwrap());
+        let root = db.add_root(&root_dir).unwrap();
+        let crawler = MetadataCrawler::new(db.clone());
+
+        crawler
+            .crawl_root(&root.id, &root_dir, Arc::new(AtomicBool::new(false)))
+            .unwrap();
+
+        fs::remove_file(root_dir.join("gone.txt")).unwrap();
+        fs::remove_dir_all(&sub).unwrap();
+        std::thread::sleep(Duration::from_millis(5));
+
+        crawler
+            .crawl_root(&root.id, &root_dir, Arc::new(AtomicBool::new(false)))
+            .unwrap();
+
+        let engine = crate::query::QueryEngine::new(db);
+        assert_eq!(
+            engine
+                .execute_search("keep", None, 1, 10)
+                .unwrap()
+                .total_matches,
+            1
+        );
+        assert_eq!(
+            engine
+                .execute_search("gone", None, 1, 10)
+                .unwrap()
+                .total_matches,
+            0
+        );
+        assert_eq!(
+            engine
+                .execute_search("nested", None, 1, 10)
+                .unwrap()
+                .total_matches,
+            0
+        );
     }
 }
