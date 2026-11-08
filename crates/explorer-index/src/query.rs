@@ -1,8 +1,10 @@
 use crate::db::{IndexDb, bytes_to_wide, path_prefix_range_bytes};
 use explorer_domain::errors::{ErrorCode, ExplorerError};
-use explorer_win::path::wide_to_path;
+use explorer_win::path::{path_to_wide, wide_to_path};
 use rusqlite::params_from_iter;
 use serde::{Deserialize, Serialize};
+use std::collections::VecDeque;
+use std::fs;
 use std::os::windows::ffi::OsStrExt;
 use std::path::Path;
 use std::sync::Arc;
@@ -285,6 +287,26 @@ impl QueryEngine {
 
         let resolved_scope: Option<(String, Option<PrefixRange>)> =
             scope_folder.and_then(|folder| self.resolve_folder_scope(folder, root_id));
+        if let Some(folder) = scope_folder {
+            if resolved_scope.is_none() {
+                if folder.is_dir() {
+                    return self.execute_live_folder_search(
+                        folder, &parsed, query_str, page, page_size,
+                    );
+                } else {
+                    return Ok(SearchResponse {
+                        query: query_str.to_string(),
+                        results: Vec::new(),
+                        total_matches: 0,
+                        is_capped: false,
+                        page,
+                        page_size,
+                        root_count: 0,
+                        indexing: false,
+                    });
+                }
+            }
+        }
         let effective_root = resolved_scope
             .as_ref()
             .map(|(rid, _)| rid.as_str())
@@ -362,6 +384,25 @@ impl QueryEngine {
             })?;
 
         let mut ranked = ranked;
+        if let Some(scope) = scope_folder {
+            let scope_prefix = explorer_win::path::strip_extended_prefix(scope);
+            let scope_lc = scope_prefix.to_string_lossy().to_lowercase();
+            let scope_trim = scope_lc.trim_end_matches(['\\', '/']);
+            ranked.retain(|(_, item)| {
+                let item_p = explorer_win::path::strip_extended_prefix(Path::new(&item.path));
+                let item_lc = item_p.to_string_lossy().to_lowercase();
+                item_lc == scope_trim
+                    || item_lc
+                        .strip_prefix(scope_trim)
+                        .is_some_and(|rest| rest.starts_with('\\') || rest.starts_with('/'))
+            });
+
+            if ranked.is_empty() && scope.is_dir() {
+                return self.execute_live_folder_search(
+                    scope, &parsed, query_str, page, page_size,
+                );
+            }
+        }
         ranked.sort_by(|a, b| {
             a.0.cmp(&b.0)
                 .then_with(|| a.1.display_name.cmp(&b.1.display_name))
@@ -388,6 +429,180 @@ impl QueryEngine {
             page_size,
             root_count,
             indexing,
+        })
+    }
+
+    fn execute_live_folder_search(
+        &self,
+        scope_folder: &Path,
+        parsed: &ParsedQuery,
+        query_str: &str,
+        page: usize,
+        page_size: usize,
+    ) -> Result<SearchResponse, ExplorerError> {
+        let mut ranked: Vec<(u8, SearchResultItem)> = Vec::new();
+        let mut queue = VecDeque::new();
+        queue.push_back(scope_folder.to_path_buf());
+
+        let primary_term = parsed
+            .text_terms
+            .first()
+            .or_else(|| parsed.phrase_terms.first())
+            .map(|s| s.to_lowercase())
+            .unwrap_or_default();
+
+        let mut processed_dirs = 0usize;
+        const MAX_DIRS: usize = 2000;
+        let mut synthetic_id = 1i64;
+
+        while let Some(current_dir) = queue.pop_front() {
+            processed_dirs += 1;
+            if processed_dirs > MAX_DIRS {
+                break;
+            }
+
+            let entries = match fs::read_dir(&current_dir) {
+                Ok(entries) => entries,
+                Err(_) => continue,
+            };
+
+            for entry in entries.filter_map(|e| e.ok()) {
+                let full_path = entry.path();
+                let file_name = entry.file_name();
+                let display_name = file_name.to_string_lossy().to_string();
+                let name_norm = display_name.to_lowercase();
+
+                let metadata = entry.metadata().ok();
+                let is_dir = metadata.as_ref().map(|m| m.is_dir()).unwrap_or(false);
+                let is_file = metadata.as_ref().map(|m| m.is_file()).unwrap_or(false);
+
+                let mut score: u8 = 3;
+                let mut matches = true;
+
+                if !primary_term.is_empty() {
+                    if name_norm == primary_term {
+                        score = 1;
+                    } else if name_norm.starts_with(&primary_term) {
+                        score = 2;
+                    } else if name_norm.contains(&primary_term) {
+                        score = 3;
+                    } else {
+                        matches = false;
+                    }
+                }
+
+                if matches {
+                    for term in parsed.text_terms.iter().chain(parsed.phrase_terms.iter()) {
+                        let term_lc = term.to_lowercase();
+                        if !name_norm.contains(&term_lc) {
+                            matches = false;
+                            break;
+                        }
+                    }
+                }
+
+                if matches {
+                    if let Some(ref ext_filter) = parsed.extension_filter {
+                        let ext = full_path
+                            .extension()
+                            .and_then(|s| s.to_str())
+                            .map(|s| s.to_lowercase())
+                            .unwrap_or_default();
+                        if ext != *ext_filter {
+                            matches = false;
+                        }
+                    }
+                }
+
+                if matches {
+                    if let Some(kind_filter) = parsed.kind_filter {
+                        let entry_kind_code = if is_dir { 1 } else if is_file { 2 } else { 3 };
+                        if entry_kind_code != kind_filter {
+                            matches = false;
+                        }
+                    }
+                }
+
+                if matches {
+                    let path_str = full_path.to_string_lossy().to_string();
+                    let path_utf16 = path_to_wide(&full_path);
+                    let ext = full_path
+                        .extension()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let kind_str = if is_dir {
+                        "directory"
+                    } else if is_file {
+                        "file"
+                    } else {
+                        "reparse_point"
+                    };
+
+                    let size_bytes = metadata.as_ref().and_then(|m| if is_file { Some(m.len()) } else { None });
+                    let modified_filetime = metadata.as_ref().and_then(|m| {
+                        m.modified().ok().and_then(|st| {
+                            st.duration_since(std::time::SystemTime::UNIX_EPOCH).ok().map(|d| d.as_secs())
+                        })
+                    });
+
+                    ranked.push((
+                        score,
+                        SearchResultItem {
+                            id: synthetic_id,
+                            root_id: "scoped_folder".to_string(),
+                            path: path_str,
+                            path_utf16,
+                            display_name: display_name.clone(),
+                            extension: ext,
+                            kind: kind_str.to_string(),
+                            size_bytes,
+                            modified_filetime,
+                        },
+                    ));
+                    synthetic_id += 1;
+
+                    if ranked.len() >= MAX_SEARCH_RESULTS {
+                        break;
+                    }
+                }
+
+                if is_dir && !display_name.starts_with('.') {
+                    queue.push_back(full_path);
+                }
+            }
+
+            if ranked.len() >= MAX_SEARCH_RESULTS {
+                break;
+            }
+        }
+
+        ranked.sort_by(|a, b| {
+            a.0.cmp(&b.0)
+                .then_with(|| a.1.display_name.to_lowercase().cmp(&b.1.display_name.to_lowercase()))
+                .then_with(|| a.1.path.cmp(&b.1.path))
+        });
+
+        let total_matches = ranked.len();
+        let is_capped = total_matches >= MAX_SEARCH_RESULTS;
+
+        let offset = (page.saturating_sub(1)) * page_size;
+        let paged_results: Vec<SearchResultItem> = ranked
+            .into_iter()
+            .skip(offset)
+            .take(page_size)
+            .map(|(_, item)| item)
+            .collect();
+
+        Ok(SearchResponse {
+            query: query_str.to_string(),
+            results: paged_results,
+            total_matches,
+            is_capped,
+            page,
+            page_size,
+            root_count: 1,
+            indexing: false,
         })
     }
 
@@ -902,10 +1117,27 @@ mod tests {
         assert_eq!(scoped.total_matches, 1);
         assert_eq!(scoped.results[0].display_name, "nested_target.rs");
 
-        // Outside any indexed root -> falls back to global search across all roots
+        // Outside any indexed root with non-existent directory -> 0 matches, never leaks other roots
         let fallback = engine
             .execute_search_scoped("target", None, Some(Path::new(r"C:\Unindexed")), 1, 10)
             .unwrap();
-        assert_eq!(fallback.total_matches, 2);
+        assert_eq!(fallback.total_matches, 0);
     }
+
+    #[test]
+    fn scoped_folder_search_in_unindexed_folder_uses_live_search() {
+        let temp = tempfile::tempdir().unwrap();
+        let unindexed_dir = temp.path().join("OneDrive");
+        std::fs::create_dir(&unindexed_dir).unwrap();
+        std::fs::write(unindexed_dir.join("onedrive_doc.txt"), "hello").unwrap();
+
+        let db = Arc::new(IndexDb::open_in_memory().unwrap());
+        let engine = QueryEngine::new(db);
+        let res = engine
+            .execute_search_scoped("onedrive_doc", None, Some(&unindexed_dir), 1, 10)
+            .unwrap();
+        assert_eq!(res.total_matches, 1);
+        assert_eq!(res.results[0].display_name, "onedrive_doc.txt");
+        assert_eq!(res.results[0].kind, "file");
+}
 }

@@ -17,6 +17,7 @@ use explorer_app::state::AppState;
 use explorer_domain::ids::{ItemToken, SessionId};
 use explorer_domain::models::{EntryKind, SortColumn, SortDirection};
 use explorer_win::known_folders::{get_logical_drives, get_standard_known_folders};
+use explorer_win::onedrive::get_onedrive_accounts;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -385,8 +386,17 @@ impl WindowState {
         self.flash_status(format!("Indexing {} for deep search", path.display()));
     }
 
-    fn schedule_search_refresh(&mut self, root_count: usize, indexing: bool) {
-        if root_count > 0 {
+    fn schedule_search_refresh(&mut self, _root_count: usize, indexing: bool) {
+        let is_current_indexed = {
+            let roots = explorer_app::operations::list_indexed_roots(&self.app_state)
+                .unwrap_or_default();
+            let cur = &self.active_tab().current_path;
+            roots
+                .iter()
+                .any(|r| cur.starts_with(&r.path) || r.path.starts_with(cur))
+        };
+
+        if is_current_indexed {
             self.search.auto_index_pending = false;
         } else if self.search.auto_index_pending {
             self.search.auto_index_attempts = self.search.auto_index_attempts.saturating_add(1);
@@ -1532,9 +1542,10 @@ impl WindowState {
     pub fn refresh_sidebar(&mut self) {
         let kf = get_standard_known_folders();
         let dr = get_logical_drives();
+        let od = get_onedrive_accounts();
         let settings = explorer_app::operations::load_settings(&self.app_state).unwrap_or_default();
-        if let Some(ref mut sb) = self.sidebar_manager {
-            sb.populate(&kf, &dr, &settings.favorites);
+        if let Some(sb) = &mut self.sidebar_manager {
+            sb.populate(&kf, &dr, &settings.favorites, &od);
         }
     }
 

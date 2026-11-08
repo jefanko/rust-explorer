@@ -1,6 +1,6 @@
 #![allow(dead_code, unsafe_op_in_unsafe_fn)]
 
-use explorer_domain::models::{DriveItem, KnownFolderItem};
+use explorer_domain::models::{DriveItem, KnownFolderItem, OneDriveItem};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
@@ -47,6 +47,7 @@ impl SidebarManager {
         known_folders: &[KnownFolderItem],
         drives: &[DriveItem],
         favorites: &[String],
+        onedrive_items: &[OneDriveItem],
     ) {
         self.ensure_image_list();
         unsafe {
@@ -86,7 +87,58 @@ impl SidebarManager {
             );
         }
 
-        // 2. This PC (Drives)
+        // 2. OneDrive (if logged in)
+        for od in onedrive_items {
+            let od_icon = crate::icons::icon_for_path(&od.path);
+            let root_od = self.insert_node(
+                TVI_ROOT,
+                &od.name,
+                Some(PathBuf::from(&od.path)),
+                od_icon,
+            );
+
+            if let Ok(entries) = std::fs::read_dir(&od.path) {
+                let mut subdirs: Vec<PathBuf> = entries
+                    .filter_map(|e| e.ok())
+                    .map(|e| e.path())
+                    .filter(|p| {
+                        p.is_dir()
+                            && !p
+                                .file_name()
+                                .and_then(|n| n.to_str())
+                                .map(|s| s.starts_with('.'))
+                                .unwrap_or(false)
+                    })
+                    .collect();
+                subdirs.sort_by(|a, b| {
+                    let na = a.file_name().and_then(|s| s.to_str()).unwrap_or("");
+                    let nb = b.file_name().and_then(|s| s.to_str()).unwrap_or("");
+                    na.to_lowercase().cmp(&nb.to_lowercase())
+                });
+
+                for sub in subdirs {
+                    let sub_name = sub
+                        .file_name()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let sub_icon = crate::icons::icon_for_path(&sub.to_string_lossy());
+                    self.insert_node(root_od, &sub_name, Some(sub), sub_icon);
+                }
+            }
+
+            unsafe {
+                let _ = SendMessageW(
+                    self.hwnd_tree,
+                    TVM_EXPAND,
+                    WPARAM(TVE_EXPAND.0 as usize),
+                    LPARAM(root_od.0),
+                );
+            }
+        }
+
+        // 3. This PC (Drives)
+
         let root_pc = self.insert_node(TVI_ROOT, "This PC", None, drive_icon);
         for drive in drives {
             let label = if let Some(free) = drive.free_bytes {

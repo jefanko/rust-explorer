@@ -104,6 +104,7 @@ fn main() {
             session_id: SessionId::new(),
             known_folders: Vec::new(),
             drives: Vec::new(),
+            onedrive_items: Vec::new(),
             initial_path: r"C:\".to_string(),
         });
 

@@ -7,6 +7,7 @@ use explorer_domain::models::{
 use explorer_domain::operations::{JobSummary, OperationPlan};
 use explorer_store::AppSettings;
 use explorer_win::known_folders::{get_logical_drives, get_standard_known_folders};
+use explorer_win::onedrive::get_onedrive_accounts;
 use explorer_win::shell::{
     open_file_with_association, open_in_windows_explorer, show_file_properties,
 };
@@ -25,6 +26,7 @@ where
 pub async fn bootstrap(state: &AppState) -> Result<BootstrapData, ExplorerError> {
     let known_folders = run_blocking("bootstrap", || Ok(get_standard_known_folders())).await?;
     let drives = run_blocking("bootstrap", || Ok(get_logical_drives())).await?;
+    let onedrive_items = run_blocking("bootstrap", || Ok(get_onedrive_accounts())).await?;
 
     let settings = state.settings_store.load_settings().unwrap_or_default();
 
@@ -45,6 +47,7 @@ pub async fn bootstrap(state: &AppState) -> Result<BootstrapData, ExplorerError>
         session_id: SessionId::new(),
         known_folders,
         drives,
+        onedrive_items,
         initial_path,
     })
 }

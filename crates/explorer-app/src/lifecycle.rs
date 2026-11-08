@@ -138,6 +138,25 @@ pub async fn restore_indexed_roots(
             });
         }
     }
+
+    // Automatically register OneDrive roots if logged in and not already covered
+    let od_accounts = explorer_win::onedrive::get_onedrive_accounts();
+    for od in od_accounts {
+        let p = std::path::PathBuf::from(&od.path);
+        if p.is_dir() {
+            let index = index_service.clone();
+            let watch = watch_service.clone();
+            tokio::task::spawn_blocking(move || {
+                if let Ok(root) = index.register_root(&p) {
+                    let sub_id = format!("indexed-root:{}", root.id);
+                    let _ = watch.subscribe(&root.path, WatchMode::Recursive, &sub_id);
+                    let _ = index.recrawl_root(&root.id);
+                }
+            })
+            .await
+            .ok();
+        }
+    }
 }
 
 /// Debounced incremental index reconciliation scheduler for an indexed root.

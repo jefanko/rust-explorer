@@ -8,6 +8,7 @@ pub mod handles;
 pub mod identity;
 pub mod instance;
 pub mod known_folders;
+pub mod onedrive;
 pub mod path;
 pub mod shell;
 pub mod sink;

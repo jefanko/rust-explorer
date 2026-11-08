@@ -61,3 +61,23 @@ pub fn icon_index(key: &str, is_dir: bool) -> i32 {
         extension => query(&format!("file.{extension}"), FILE_ATTRIBUTE_NORMAL, true),
     }
 }
+
+/// Icon index for a specific filesystem path (e.g. OneDrive folder or custom icon).
+pub fn icon_for_path(path: &str) -> i32 {
+    let wide: Vec<u16> = path.encode_utf16().chain(Some(0)).collect();
+    let mut info = SHFILEINFOW::default();
+    let result = unsafe {
+        SHGetFileInfoW(
+            PCWSTR(wide.as_ptr()),
+            windows::Win32::Storage::FileSystem::FILE_FLAGS_AND_ATTRIBUTES(0),
+            Some(&mut info),
+            std::mem::size_of::<SHFILEINFOW>() as u32,
+            SHGFI_SYSICONINDEX | SHGFI_SMALLICON,
+        )
+    };
+    if result == 0 {
+        query("folder", FILE_ATTRIBUTE_DIRECTORY, true)
+    } else {
+        info.iIcon
+    }
+}

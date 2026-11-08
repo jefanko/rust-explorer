@@ -72,11 +72,22 @@ pub struct DriveItem {
     pub free_bytes: Option<u64>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct OneDriveItem {
+    pub id: String,
+    pub name: String,
+    pub path: String,
+    pub account_type: String,
+    pub email: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BootstrapData {
     pub session_id: SessionId,
     pub known_folders: Vec<KnownFolderItem>,
     pub drives: Vec<DriveItem>,
+    #[serde(default)]
+    pub onedrive_items: Vec<OneDriveItem>,
     pub initial_path: String,
 }
 
