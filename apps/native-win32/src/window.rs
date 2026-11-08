@@ -388,8 +388,8 @@ impl WindowState {
 
     fn schedule_search_refresh(&mut self, _root_count: usize, indexing: bool) {
         let is_current_indexed = {
-            let roots = explorer_app::operations::list_indexed_roots(&self.app_state)
-                .unwrap_or_default();
+            let roots =
+                explorer_app::operations::list_indexed_roots(&self.app_state).unwrap_or_default();
             let cur = &self.active_tab().current_path;
             roots
                 .iter()

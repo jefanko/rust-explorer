@@ -90,12 +90,8 @@ impl SidebarManager {
         // 2. OneDrive (if logged in)
         for od in onedrive_items {
             let od_icon = crate::icons::icon_for_path(&od.path);
-            let root_od = self.insert_node(
-                TVI_ROOT,
-                &od.name,
-                Some(PathBuf::from(&od.path)),
-                od_icon,
-            );
+            let root_od =
+                self.insert_node(TVI_ROOT, &od.name, Some(PathBuf::from(&od.path)), od_icon);
 
             if let Ok(entries) = std::fs::read_dir(&od.path) {
                 let mut subdirs: Vec<PathBuf> = entries

@@ -287,24 +287,23 @@ impl QueryEngine {
 
         let resolved_scope: Option<(String, Option<PrefixRange>)> =
             scope_folder.and_then(|folder| self.resolve_folder_scope(folder, root_id));
-        if let Some(folder) = scope_folder {
-            if resolved_scope.is_none() {
-                if folder.is_dir() {
-                    return self.execute_live_folder_search(
-                        folder, &parsed, query_str, page, page_size,
-                    );
-                } else {
-                    return Ok(SearchResponse {
-                        query: query_str.to_string(),
-                        results: Vec::new(),
-                        total_matches: 0,
-                        is_capped: false,
-                        page,
-                        page_size,
-                        root_count: 0,
-                        indexing: false,
-                    });
-                }
+        if let Some(folder) = scope_folder
+            && resolved_scope.is_none()
+        {
+            if folder.is_dir() {
+                return self
+                    .execute_live_folder_search(folder, &parsed, query_str, page, page_size);
+            } else {
+                return Ok(SearchResponse {
+                    query: query_str.to_string(),
+                    results: Vec::new(),
+                    total_matches: 0,
+                    is_capped: false,
+                    page,
+                    page_size,
+                    root_count: 0,
+                    indexing: false,
+                });
             }
         }
         let effective_root = resolved_scope
@@ -398,9 +397,7 @@ impl QueryEngine {
             });
 
             if ranked.is_empty() && scope.is_dir() {
-                return self.execute_live_folder_search(
-                    scope, &parsed, query_str, page, page_size,
-                );
+                return self.execute_live_folder_search(scope, &parsed, query_str, page, page_size);
             }
         }
         ranked.sort_by(|a, b| {
@@ -501,25 +498,27 @@ impl QueryEngine {
                     }
                 }
 
-                if matches {
-                    if let Some(ref ext_filter) = parsed.extension_filter {
-                        let ext = full_path
-                            .extension()
-                            .and_then(|s| s.to_str())
-                            .map(|s| s.to_lowercase())
-                            .unwrap_or_default();
-                        if ext != *ext_filter {
-                            matches = false;
-                        }
+                if matches && let Some(ref ext_filter) = parsed.extension_filter {
+                    let ext = full_path
+                        .extension()
+                        .and_then(|s| s.to_str())
+                        .map(|s| s.to_lowercase())
+                        .unwrap_or_default();
+                    if ext != *ext_filter {
+                        matches = false;
                     }
                 }
 
-                if matches {
-                    if let Some(kind_filter) = parsed.kind_filter {
-                        let entry_kind_code = if is_dir { 1 } else if is_file { 2 } else { 3 };
-                        if entry_kind_code != kind_filter {
-                            matches = false;
-                        }
+                if matches && let Some(kind_filter) = parsed.kind_filter {
+                    let entry_kind_code = if is_dir {
+                        1
+                    } else if is_file {
+                        2
+                    } else {
+                        3
+                    };
+                    if entry_kind_code != kind_filter {
+                        matches = false;
                     }
                 }
 
@@ -539,10 +538,14 @@ impl QueryEngine {
                         "reparse_point"
                     };
 
-                    let size_bytes = metadata.as_ref().and_then(|m| if is_file { Some(m.len()) } else { None });
+                    let size_bytes = metadata
+                        .as_ref()
+                        .and_then(|m| if is_file { Some(m.len()) } else { None });
                     let modified_filetime = metadata.as_ref().and_then(|m| {
                         m.modified().ok().and_then(|st| {
-                            st.duration_since(std::time::SystemTime::UNIX_EPOCH).ok().map(|d| d.as_secs())
+                            st.duration_since(std::time::SystemTime::UNIX_EPOCH)
+                                .ok()
+                                .map(|d| d.as_secs())
                         })
                     });
 
@@ -579,7 +582,11 @@ impl QueryEngine {
 
         ranked.sort_by(|a, b| {
             a.0.cmp(&b.0)
-                .then_with(|| a.1.display_name.to_lowercase().cmp(&b.1.display_name.to_lowercase()))
+                .then_with(|| {
+                    a.1.display_name
+                        .to_lowercase()
+                        .cmp(&b.1.display_name.to_lowercase())
+                })
                 .then_with(|| a.1.path.cmp(&b.1.path))
         });
 
@@ -1139,5 +1146,5 @@ mod tests {
         assert_eq!(res.total_matches, 1);
         assert_eq!(res.results[0].display_name, "onedrive_doc.txt");
         assert_eq!(res.results[0].kind, "file");
-}
+    }
 }

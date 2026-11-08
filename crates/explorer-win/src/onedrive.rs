@@ -4,14 +4,14 @@ use crate::path::wide_to_path;
 use explorer_domain::models::OneDriveItem;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use windows::core::{GUID, PCWSTR};
 use windows::Win32::Foundation::HANDLE;
 use windows::Win32::System::Com::CoTaskMemFree;
 use windows::Win32::System::Registry::{
-    RegCloseKey, RegEnumKeyExW, RegOpenKeyExW, RegQueryValueExW, HKEY, HKEY_CURRENT_USER,
-    KEY_READ, REG_VALUE_TYPE,
+    HKEY, HKEY_CURRENT_USER, KEY_READ, REG_VALUE_TYPE, RegCloseKey, RegEnumKeyExW, RegOpenKeyExW,
+    RegQueryValueExW,
 };
 use windows::Win32::UI::Shell::{KF_FLAG_DEFAULT, SHGetKnownFolderPath};
+use windows::core::{GUID, PCWSTR};
 
 // FOLDERID_SkyDrive = {A52BBA46-E9E1-435F-B3D9-28DAA648C0F6}
 pub const FOLDERID_SKYDRIVE: GUID = GUID::from_u128(0xA52BBA46_E9E1_435F_B3D9_28DAA648C0F6);
@@ -50,12 +50,10 @@ fn read_reg_string(hkey: HKEY, value_name: &str) -> Option<String> {
         }
 
         let actual_len = buffer.iter().position(|&c| c == 0).unwrap_or(u16_len);
-        let val = String::from_utf16_lossy(&buffer[..actual_len]).trim().to_string();
-        if val.is_empty() {
-            None
-        } else {
-            Some(val)
-        }
+        let val = String::from_utf16_lossy(&buffer[..actual_len])
+            .trim()
+            .to_string();
+        if val.is_empty() { None } else { Some(val) }
     }
 }
 
@@ -72,11 +70,7 @@ pub fn get_known_skydrive_path() -> Option<PathBuf> {
                 let slice = path_pwstr.as_wide();
                 let path = wide_to_path(slice);
                 CoTaskMemFree(Some(path_pwstr.as_ptr() as *const _));
-                if path.is_dir() {
-                    Some(path)
-                } else {
-                    None
-                }
+                if path.is_dir() { Some(path) } else { None }
             }
             _ => None,
         }
@@ -140,34 +134,34 @@ fn detect_registry_accounts() -> Vec<OneDriveItem> {
         };
 
         if open_sub.is_ok() {
-            if let Some(user_folder) = read_reg_string(h_account, "UserFolder") {
-                if Path::new(&user_folder).is_dir() {
-                    let display_name = read_reg_string(h_account, "DisplayName");
-                    let user_email = read_reg_string(h_account, "UserEmail");
-                    let account_type = if subkey_name.eq_ignore_ascii_case("Personal") {
-                        "Personal".to_string()
-                    } else if subkey_name.to_lowercase().starts_with("business") {
-                        "Business".to_string()
-                    } else {
-                        "OneDrive".to_string()
-                    };
+            if let Some(user_folder) = read_reg_string(h_account, "UserFolder")
+                && Path::new(&user_folder).is_dir()
+            {
+                let display_name = read_reg_string(h_account, "DisplayName");
+                let user_email = read_reg_string(h_account, "UserEmail");
+                let account_type = if subkey_name.eq_ignore_ascii_case("Personal") {
+                    "Personal".to_string()
+                } else if subkey_name.to_lowercase().starts_with("business") {
+                    "Business".to_string()
+                } else {
+                    "OneDrive".to_string()
+                };
 
-                    let label = if let Some(dn) = display_name {
-                        dn
-                    } else if account_type == "Business" {
-                        "OneDrive - Business".to_string()
-                    } else {
-                        "OneDrive".to_string()
-                    };
+                let label = if let Some(dn) = display_name {
+                    dn
+                } else if account_type == "Business" {
+                    "OneDrive - Business".to_string()
+                } else {
+                    "OneDrive".to_string()
+                };
 
-                    items.push(OneDriveItem {
-                        id: format!("onedrive_{}", subkey_name.to_lowercase()),
-                        name: label,
-                        path: user_folder,
-                        account_type,
-                        email: user_email,
-                    });
-                }
+                items.push(OneDriveItem {
+                    id: format!("onedrive_{}", subkey_name.to_lowercase()),
+                    name: label,
+                    path: user_folder,
+                    account_type,
+                    email: user_email,
+                });
             }
             unsafe {
                 let _ = RegCloseKey(h_account);
@@ -204,16 +198,16 @@ fn detect_root_registry_account() -> Option<OneDriveItem> {
         let _ = RegCloseKey(h_onedrive);
     }
 
-    if let Some(folder) = user_folder {
-        if Path::new(&folder).is_dir() {
-            return Some(OneDriveItem {
-                id: "onedrive_root".to_string(),
-                name: "OneDrive".to_string(),
-                path: folder,
-                account_type: "Personal".to_string(),
-                email: None,
-            });
-        }
+    if let Some(folder) = user_folder
+        && Path::new(&folder).is_dir()
+    {
+        return Some(OneDriveItem {
+            id: "onedrive_root".to_string(),
+            name: "OneDrive".to_string(),
+            path: folder,
+            account_type: "Personal".to_string(),
+            email: None,
+        });
     }
     None
 }
